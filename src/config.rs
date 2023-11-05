@@ -9,21 +9,25 @@ pub enum ConfigError {
 }
 
 pub struct Config {
-    pub layout: PathBuf,
+    pub current_dir: PathBuf,
     pub outdir: PathBuf,
 }
 
 impl Config {
     pub fn init() -> Result<Self, ConfigError> {
-        let layout = PathBuf::from("layout.liquid");
-        let outdir = PathBuf::from("public");
-        if !layout.exists() {
-            return Err(ConfigError::MissingLayout);
-        }
+        let current_dir = std::env::current_dir().unwrap();
+        let outdir = current_dir.join("public");
         // TODO the creation of outdir probably should happen somewhere else.
         if !outdir.is_dir() {
             std::fs::create_dir_all(&outdir).unwrap();
         }
-        Ok(Self { layout, outdir })
+        Ok(Self {
+            current_dir,
+            outdir,
+        })
+    }
+
+    pub fn layout_dir(&self) -> PathBuf {
+        self.current_dir.join("layouts")
     }
 }

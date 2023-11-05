@@ -1,20 +1,17 @@
-use std::fs;
-
-use crate::{diskio, parse_markdown, styles, Config, Renderer};
+use crate::{diskio, parse_markdown_file, styles, Config, Renderer};
 
 pub fn generate() {
     let config = Config::init().map_or_else(|e| panic!("{}", e), |c| c);
     let renderer = Renderer::new(&config);
-    // let layout_map = diskio::collect_layouts(&config.layout);
-    let html_paths = diskio::walk_markdowns()
-        .map(|p| {
-            println!("{:?}", p);
-            let raw = fs::read_to_string(p).unwrap();
-            let markdown = parse_markdown(&raw).unwrap();
-            // TODO have to check no slug collisions at this point too.
-            let rendered = renderer.render(&markdown).unwrap();
+    let html_paths = diskio::walk_markdowns(&config.current_dir)
+        .map(|path| {
+            println!("{:?}", path);
+            // TODO want to check no slug collisions too.
+            let markdown =
+                parse_markdown_file(path.strip_prefix(&config.current_dir).unwrap()).unwrap();
+            let rendered = renderer.render(&markdown).expect("rendering failed");
             // TODO would be good to generate in tempdir so failure could be atomic?
-            diskio::write_html(&markdown.frontmatter.slug, &rendered)
+            diskio::write_html(&markdown.path, &markdown.frontmatter.slug, &rendered)
         })
         .collect::<Vec<_>>();
     styles::generate_css(&html_paths);

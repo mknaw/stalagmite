@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::prelude::*;
 use nom::bytes::complete::tag;
@@ -11,11 +11,13 @@ use thiserror::Error;
 
 use crate::utils::slugify;
 
-type Paragraph = Vec<Token>;
+type Block = Vec<Token>;
 type MarkdownResult<T> = Result<T, MarkdownError>;
 
 #[derive(Error, Debug)]
 pub enum MarkdownError {
+    #[error("io error")]
+    IoError(#[from] std::io::Error),
     #[error("parsing error")]
     ParseError,
 }
@@ -67,33 +69,36 @@ impl TryFrom<HashMap<&str, &str>> for FrontMatter {
 
 #[derive(Debug)]
 pub struct Markdown {
+    pub path: PathBuf,
     pub frontmatter: FrontMatter,
-    pub paragraphs: Vec<Paragraph>,
+    pub blocks: Vec<Block>,
     // layout: PathBuf,
 }
 
+/// Extract the relevant bits from the `contents` of a `.md` file
+fn parse_markdown(contents: &str) -> IResult<&str, (FrontMatter, Vec<Block>)> {
+    let input = contents.trim();
+    let (input, frontmatter) = delimited(tag("---"), parse_frontmatter, tag("---"))(input)?;
+    let blocks = parse_body(input);
+    // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
+    Ok((input, (frontmatter, blocks)))
+}
+
 /// Parse a `.md` file containing some post
-pub fn parse_markdown(input: &str) -> MarkdownResult<Markdown> {
-    fn parse(input: &str) -> IResult<&str, Markdown> {
-        let input = input.trim();
-        let (input, frontmatter) = delimited(tag("---"), parse_frontmatter, tag("---"))(input)?;
-        let paragraphs = parse_body(input);
-        // TODO don't really need `layout` in frontmatter after this...
-        // or maybe just should leave in frontmatter and not extract
-        // let layout = if let Some(layout) = frontmatter.layout.as_ref().cloned() {
-        //     layout
-        // } else {
-        //     PathBuf::from("default.liquid")
-        // };
-        let markdown = Markdown {
-            frontmatter,
-            paragraphs,
-            // layout,
-        };
-        // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
-        Ok((input, markdown))
-    }
-    parse(input).map_or_else(|_| Err(MarkdownError::ParseError), |(_, md)| Ok(md))
+pub fn parse_markdown_file(path: &Path) -> MarkdownResult<Markdown> {
+    let contents = std::fs::read_to_string(path)?;
+    let (_, (frontmatter, blocks)) =
+        parse_markdown(&contents).map_err(|_| MarkdownError::ParseError)?;
+    Ok(Markdown {
+        path: path
+            .parent()
+            .unwrap()
+            .strip_prefix("pages/")
+            .unwrap()
+            .to_path_buf(),
+        frontmatter,
+        blocks,
+    })
 }
 
 /// Parse out some arbitrary "foo: bar" + newline
@@ -117,7 +122,7 @@ fn parse_frontmatter(input: &str) -> IResult<&str, FrontMatter> {
 }
 
 /// Parse out the `body` of the post
-fn parse_body(input: &str) -> Vec<Paragraph> {
+fn parse_body(input: &str) -> Vec<Block> {
     // TODO probably should be doing this with `nom` too but I can't be buggered right now.
     input
         .trim()
@@ -150,17 +155,17 @@ First, I'd like to start with this paragraph.
 
 Then I'd like to add another paragraph.
         "#;
-        let mut markdown = parse_markdown(input).unwrap();
-        assert_eq!(&markdown.frontmatter.title, "Excellent Blog Post",);
+        let (_, (frontmatter, mut blocks)) = parse_markdown(input).unwrap();
+        assert_eq!(&frontmatter.title, "Excellent Blog Post",);
         assert_eq!(
-            markdown.frontmatter.timestamp,
+            frontmatter.timestamp,
             Utc.with_ymd_and_hms(2023, 10, 21, 15, 0, 0).unwrap(),
         );
-        assert_eq!(&markdown.frontmatter.slug, "excellent-blog-post");
+        assert_eq!(&frontmatter.slug, "excellent-blog-post");
 
-        let second_paragraph = markdown.paragraphs.pop().unwrap();
-        let first_paragraph = markdown.paragraphs.pop().unwrap();
-        assert!(markdown.paragraphs.is_empty());
+        let second_paragraph = blocks.pop().unwrap();
+        let first_paragraph = blocks.pop().unwrap();
+        assert!(blocks.is_empty());
         assert_eq!(
             first_paragraph,
             vec![Token::Literal(

@@ -17,8 +17,6 @@ pub fn collect_layouts(dir: &Path) -> HashMap<String, String> {
         if let Ok(entry) = entry {
             if entry.path().is_file() && entry.path().extension() == Some("liquid".as_ref()) {
                 let layout = fs::read_to_string(entry.path()).unwrap();
-                // TODO prefer to give the layouts some kinds of names instead of the path
-
                 return Some((
                     make_layout_key(entry.path().strip_prefix(dir).unwrap()),
                     layout,
@@ -29,18 +27,22 @@ pub fn collect_layouts(dir: &Path) -> HashMap<String, String> {
     }))
 }
 
-pub fn walk_markdowns() -> Box<dyn Iterator<Item = PathBuf>> {
-    let paths = fs::read_dir("./pages").unwrap();
-    Box::new(
-        paths
-            .flatten()
-            .map(|p| p.path())
-            .filter(|p| p.is_file() && p.extension().map(|oss| oss.to_str()) == Some(Some("md"))),
-    )
+/// Recursively walk `dir` and return an iterator of all markdown files.
+pub fn walk_markdowns(dir: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
+    let iter = Walk::new(dir).flatten().filter_map(|entry| {
+        let path = entry.path();
+        if path.is_file() && path.extension() == Some("md".as_ref()) {
+            Some(path.to_owned())
+        } else {
+            None
+        }
+    });
+    Box::new(iter)
 }
 
-pub fn write_html(slug: &str, html: &str) -> PathBuf {
-    let mut path = PathBuf::from(format!("./public/{}/", slug));
+pub fn write_html(path: &Path, slug: &str, html: &str) -> PathBuf {
+    let mut path = PathBuf::from("./public/").join(path).join(slug);
+    dbg!(&path);
     fs::create_dir_all(&path).unwrap();
     path.push("index.html");
     fs::write(&path, html).unwrap();

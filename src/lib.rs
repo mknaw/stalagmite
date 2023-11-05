@@ -3,7 +3,7 @@ mod devserver;
 pub mod diskio;
 mod generator;
 mod markdown;
-mod project;
+pub mod project;
 mod render;
 pub mod styles;
 mod utils;
@@ -11,6 +11,5 @@ mod utils;
 pub use config::Config;
 pub use devserver::run as run_dev_server;
 pub use generator::generate;
-pub use markdown::parse_markdown; // TODO temporary
-pub use project::initialize as initialize_project;
+pub use markdown::parse_markdown_file;
 pub use render::Renderer;
