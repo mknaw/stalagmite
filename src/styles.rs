@@ -21,6 +21,7 @@ pub fn generate_css(input: &[PathBuf]) {
         &mut warnings,
     );
 
+    // TODO cache-bust with name
     let mut css_file = File::create("./public/styles.css").unwrap();
     css_file.write_all(css.as_bytes()).unwrap();
 

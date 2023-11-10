@@ -27,7 +27,11 @@ impl Config {
         })
     }
 
-    pub fn layout_dir(&self) -> PathBuf {
+    pub fn layouts_dir(&self) -> PathBuf {
         self.current_dir.join("layouts")
+    }
+
+    pub fn blocks_dir(&self) -> PathBuf {
+        self.current_dir.join("blocks")
     }
 }

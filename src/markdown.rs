@@ -1,17 +1,16 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use chrono::prelude::*;
-use nom::bytes::complete::tag;
-use nom::character::complete::{alpha1, newline, not_line_ending};
-use nom::multi::{many0, separated_list1};
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take, take_until, take_while};
+use nom::character::complete::{char, newline, not_line_ending};
+use nom::combinator::{map, opt};
 use nom::sequence::delimited;
 use nom::IResult;
 use thiserror::Error;
 
-use crate::utils::slugify;
+use crate::pages::{Block, FrontMatter, Token};
 
-type Block = Vec<Token>;
 type MarkdownResult<T> = Result<T, MarkdownError>;
 
 #[derive(Error, Debug)]
@@ -22,127 +21,118 @@ pub enum MarkdownError {
     ParseError,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Token {
-    Literal(String),
-}
-
-#[derive(Debug, PartialEq)]
-pub struct FrontMatter {
-    pub title: String,
-    pub timestamp: DateTime<Utc>,
-    pub slug: String,
-    // TODO want to be able to just pass a String tag rather than a filepath
-    pub layout: Option<PathBuf>,
-}
-
-impl TryFrom<Vec<(&str, &str)>> for FrontMatter {
-    type Error = &'static str;
-
-    fn try_from(kvs: Vec<(&str, &str)>) -> Result<Self, Self::Error> {
-        let kvs = HashMap::from_iter(kvs);
-        kvs.try_into()
-    }
-}
-
-impl TryFrom<HashMap<&str, &str>> for FrontMatter {
-    type Error = &'static str;
-
-    fn try_from(kv: HashMap<&str, &str>) -> Result<Self, Self::Error> {
-        let title = kv.get("title").ok_or("missing title")?;
-        let timestamp = kv
-            .get("timestamp")
-            .map(|s| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)))
-            .unwrap()
-            .unwrap();
-        let slug = kv
-            .get("slug")
-            .map_or_else(|| slugify(title), |s| s.to_string());
-        Ok(FrontMatter {
-            title: title.to_string(),
-            timestamp,
-            slug,
-            layout: None,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct Markdown {
-    pub path: PathBuf,
-    pub frontmatter: FrontMatter,
-    pub blocks: Vec<Block>,
-    // layout: PathBuf,
-}
-
 /// Extract the relevant bits from the `contents` of a `.md` file
 fn parse_markdown(contents: &str) -> IResult<&str, (FrontMatter, Vec<Block>)> {
     let input = contents.trim();
-    let (input, frontmatter) = delimited(tag("---"), parse_frontmatter, tag("---"))(input)?;
+    let (input, frontmatter_raw) = delimited(tag("---"), take_until("---"), tag("---"))(input)?;
+    // TODO lightly gross to first allocate the `HashMap` just to try to supply some programmatic
+    // defaults to the `FrontMatter` struct. Maybe there's a better way
+    let frontmatter: HashMap<&str, &str> = serde_yaml::from_str(frontmatter_raw).unwrap();
     let blocks = parse_body(input);
     // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
-    Ok((input, (frontmatter, blocks)))
+    Ok((input, (frontmatter.try_into().unwrap(), blocks)))
 }
 
 /// Parse a `.md` file containing some post
-pub fn parse_markdown_file(path: &Path) -> MarkdownResult<Markdown> {
+pub fn parse_markdown_file(path: &Path) -> MarkdownResult<(FrontMatter, Vec<Block>)> {
     let contents = std::fs::read_to_string(path)?;
     let (_, (frontmatter, blocks)) =
         parse_markdown(&contents).map_err(|_| MarkdownError::ParseError)?;
-    Ok(Markdown {
-        path: path
-            .parent()
-            .unwrap()
-            .strip_prefix("pages/")
-            .unwrap()
-            .to_path_buf(),
-        frontmatter,
-        blocks,
-    })
+    Ok((frontmatter, blocks))
 }
 
-/// Parse out some arbitrary "foo: bar" + newline
-fn parse_metadata_kv(input: &str) -> IResult<&str, (&str, &str)> {
-    let (input, key) = alpha1(input)?;
-    let (input, _) = tag(": ")(input)?;
-    let (input, value) = not_line_ending(input)?;
-    Ok((input, (key, value)))
-}
-
-/// Parse out the `frontmatter` metadata
-fn parse_frontmatter(input: &str) -> IResult<&str, FrontMatter> {
-    // TODO would have expected `separated_list1` to do this, so maybe I'm doing it wrong.
-    let (input, _) = many0(newline)(input)?;
-    let (input, frontmatter) =
-        nom::combinator::map_res(separated_list1(newline, parse_metadata_kv), |kvs| {
-            kvs.try_into()
-        })(input)?;
-    let (input, _) = many0(newline)(input)?;
-    Ok((input, frontmatter))
-}
-
-/// Parse out the `body` of the post
+/// Parse out the `body` of the post, which is composed of `Block`s.
 fn parse_body(input: &str) -> Vec<Block> {
     // TODO probably should be doing this with `nom` too but I can't be buggered right now.
-    input
-        .trim()
-        .split("\n\n")
-        .map(|p| vec![Token::Literal(p.to_string())])
-        .collect()
+    input.trim().split("\n\n").map(parse_block).collect()
+}
+
+/// Try parsing non-default `Block` `kind`s, which determine the rendering of the block.
+fn parse_kind(input: &str) -> IResult<&str, &str> {
+    let (input, kind) = alt((
+        map(tag("# "), |_| "h1"),
+        map(tag("## "), |_| "h2"),
+        map(tag("### "), |_| "h3"),
+        map(tag("#### "), |_| "h4"),
+        map(tag("##### "), |_| "h5"),
+        map(tag("###### "), |_| "h6"),
+        |input| {
+            // Custom block kinds are declared like `~kind`.
+            let (input, _) = tag("~:")(input)?;
+            // TODO this shouldn't have any spaces in it, either.
+            let (input, kind) = not_line_ending(input)?;
+            let (input, _) = newline(input)?;
+            Ok((input, kind))
+        },
+    ))(input)?;
+    Ok((input, kind))
+}
+
+/// Parse a single chunk of text into a `Block`.
+fn parse_block(content: &str) -> Block {
+    // TODO nested block support, like links etc.
+    let (content, kind) = opt(parse_kind)(content).unwrap();
+    Block {
+        kind: kind.map_or("p".to_string(), |k| k.to_string()),
+        tokens: parse_inner(content),
+    }
+}
+
+fn parse_nested_special_token<'a>(
+    delimiter: char,
+    kind: &'a str,
+) -> impl nom::Parser<&'a str, Token, nom::error::Error<&'a str>> {
+    move |input: &'a str| {
+        let (input, _) = char(delimiter)(input)?;
+        let (input, content) = take_while(|c| c != delimiter)(input)?;
+        let tokens = parse_inner(content);
+        let (input, _) = char(delimiter)(input)?;
+        Ok((
+            input,
+            Token::Block(Block {
+                kind: kind.to_string(),
+                tokens,
+            }),
+        ))
+    }
+}
+
+// TODO this looks terrible, but I gues it works for now.
+fn parse_inner(content: &str) -> Vec<Token> {
+    let mut content = content;
+    let mut result = vec![];
+    let mut literal = String::new();
+    while !content.is_empty() {
+        let (rest, nested) = opt(alt((
+            parse_nested_special_token('`', "code"),
+            parse_nested_special_token('*', "b"),
+            parse_nested_special_token('_', "i"),
+        )))(content)
+        .unwrap();
+        content = if let Some(nested) = nested {
+            if !literal.is_empty() {
+                result.push(Token::Literal(literal));
+                literal = String::new();
+            }
+            result.push(nested);
+            rest
+        } else {
+            let (rest, next) = take::<usize, &str, nom::error::Error<&str>>(1usize)(rest).unwrap();
+            literal.push_str(next);
+            rest
+        };
+    }
+    if !literal.is_empty() {
+        result.push(Token::Literal(literal));
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::{TimeZone, Utc};
 
-    #[test]
-    fn parse_metadata_kv_test() {
-        let input = "foo: bar";
-        let (input, (key, val)) = parse_metadata_kv(input).unwrap();
-        assert_eq!(input, "");
-        assert_eq!(key, "foo");
-        assert_eq!(val, "bar");
-    }
+    use super::*;
 
     #[test]
     fn parse_markdown_test() {
@@ -167,16 +157,30 @@ Then I'd like to add another paragraph.
         let first_paragraph = blocks.pop().unwrap();
         assert!(blocks.is_empty());
         assert_eq!(
-            first_paragraph,
+            first_paragraph.tokens,
             vec![Token::Literal(
                 "First, I'd like to start with this paragraph.".to_string()
             )],
         );
         assert_eq!(
-            second_paragraph,
+            second_paragraph.tokens,
             vec![Token::Literal(
                 "Then I'd like to add another paragraph.".to_string()
             )],
+        );
+    }
+
+    #[test]
+    fn parse_parse_nested_special_token() {
+        let input = "`code is here`";
+        let parser = parse_nested_special_token('`', "code");
+        let (_, token) = opt(parser)(input).unwrap();
+        assert_eq!(
+            token,
+            Some(Token::Block(Block {
+                kind: "code".to_string(),
+                tokens: vec![Token::Literal("code is here".to_string())],
+            })),
         );
     }
 }

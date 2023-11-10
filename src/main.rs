@@ -24,6 +24,7 @@ enum Commands {
 enum AddCommand {
     Page { path: String, title: String },
     Layout { path: String },
+    Rules { path: String },
 }
 
 #[tokio::main]
@@ -31,12 +32,17 @@ async fn main() {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Init => project::initialize().unwrap(),
+        // TODO (maybe): these path arguments are pretty UNIX centric...
         Commands::Add { add_command } => match add_command {
             AddCommand::Page { path, title } => {
                 project::add_page(path, title).unwrap();
                 println!("Added page at {} with title {}", path, title);
             }
             AddCommand::Layout { .. } => unimplemented!(),
+            AddCommand::Rules { path } => {
+                project::add_rule_set(path).unwrap();
+                println!("Added rule set at {}", path);
+            }
         },
         Commands::Gen => generate(),
         // TODO devserver should be an optional feature

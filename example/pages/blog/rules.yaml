@@ -1,0 +1,5 @@
+layouts:
+  - primary
+  - blogpost
+blocks:
+  p: fancy-paragraph
