@@ -1,10 +1,30 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
     <head>
-        <title>{{ meta.title }}</title>
-        <link rel="stylesheet" href="/styles.css">
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{{ meta.title|default:"Example Stalagmite Site" }}</title>
+        {% tailwind %}
     </head>
     <body>
         <main>
+            <nav class="bg-gray-800">
+                <div class="container mx-auto px-6 py-3">
+                    <div class="flex justify-between items-center">
+                        <div class="flex">
+                            <!-- Logo or Brand Name -->
+                            <div class="text-white text-lg font-semibold">Stalagmite</div>
+                            <!-- Nav Items -->
+                            <div class="ml-10 space-x-4">
+                                <a href="#home" class="text-gray-300 hover:text-white">Home</a>
+                                <a href="#blog" class="text-gray-300 hover:text-white">Blog</a>
+                                <a href="#projects" class="text-gray-300 hover:text-white">Projects</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
             {{ content }}
         </main>
     </body>

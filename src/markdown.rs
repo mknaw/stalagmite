@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::path::Path;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take, take_until, take_while};
 use nom::character::complete::{char, newline, not_line_ending};
 use nom::combinator::{map, opt};
+use nom::multi::many0;
 use nom::sequence::delimited;
 use nom::IResult;
 use thiserror::Error;
 
-use crate::pages::{Block, FrontMatter, Token};
+use crate::core::{Block, FrontMatter, Token};
 
 type MarkdownResult<T> = Result<T, MarkdownError>;
 
@@ -21,30 +21,29 @@ pub enum MarkdownError {
     ParseError,
 }
 
-/// Extract the relevant bits from the `contents` of a `.md` file
-fn parse_markdown(contents: &str) -> IResult<&str, (FrontMatter, Vec<Block>)> {
-    let input = contents.trim();
-    let (input, frontmatter_raw) = delimited(tag("---"), take_until("---"), tag("---"))(input)?;
-    // TODO lightly gross to first allocate the `HashMap` just to try to supply some programmatic
-    // defaults to the `FrontMatter` struct. Maybe there's a better way
-    let frontmatter: HashMap<&str, &str> = serde_yaml::from_str(frontmatter_raw).unwrap();
-    let blocks = parse_body(input);
-    // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
-    Ok((input, (frontmatter.try_into().unwrap(), blocks)))
-}
-
-/// Parse a `.md` file containing some post
-pub fn parse_markdown_file(path: &Path) -> MarkdownResult<(FrontMatter, Vec<Block>)> {
-    let contents = std::fs::read_to_string(path)?;
-    let (_, (frontmatter, blocks)) =
-        parse_markdown(&contents).map_err(|_| MarkdownError::ParseError)?;
-    Ok((frontmatter, blocks))
+pub fn parse_frontmatter(contents: &[u8]) -> MarkdownResult<(FrontMatter, usize)> {
+    fn parse(input: &[u8]) -> IResult<&[u8], FrontMatter> {
+        let (input, _) = many0(newline)(input)?;
+        let (input, frontmatter_raw) =
+            delimited(tag(b"---"), take_until("---"), tag(b"---"))(input)?;
+        let (input, _) = many0(newline)(input)?;
+        // TODO lightly gross to first allocate the `HashMap` just to try to supply some programmatic
+        // defaults to the `FrontMatter` struct. Maybe there's a better way
+        let frontmatter: HashMap<&str, &str> = serde_yaml::from_slice(frontmatter_raw).unwrap();
+        // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
+        Ok((input, frontmatter.try_into().unwrap()))
+    }
+    let total_len = contents.len();
+    let (remaining, frontmatter) = parse(contents).map_err(|_| MarkdownError::ParseError)?;
+    let offset = total_len - remaining.len();
+    Ok((frontmatter, offset))
 }
 
 /// Parse out the `body` of the post, which is composed of `Block`s.
-fn parse_body(input: &str) -> Vec<Block> {
-    // TODO probably should be doing this with `nom` too but I can't be buggered right now.
-    input.trim().split("\n\n").map(parse_block).collect()
+pub fn parse_blocks(contents: &[u8]) -> Vec<Block> {
+    // TODO should be able to do it without reading to &str, perhaps with `nom`.
+    let contents = std::str::from_utf8(contents).unwrap();
+    contents.trim().split("\n\n").map(parse_block).collect()
 }
 
 /// Try parsing non-default `Block` `kind`s, which determine the rendering of the block.
@@ -136,7 +135,7 @@ mod tests {
 
     #[test]
     fn parse_markdown_test() {
-        let input = r#"
+        let input = br#"
 ---
 title: Excellent Blog Post
 timestamp: 2023-10-21T10:00:00-05:00
@@ -145,13 +144,15 @@ First, I'd like to start with this paragraph.
 
 Then I'd like to add another paragraph.
         "#;
-        let (_, (frontmatter, mut blocks)) = parse_markdown(input).unwrap();
+        let (frontmatter, offset) = parse_frontmatter(input).unwrap();
         assert_eq!(&frontmatter.title, "Excellent Blog Post",);
         assert_eq!(
             frontmatter.timestamp,
             Utc.with_ymd_and_hms(2023, 10, 21, 15, 0, 0).unwrap(),
         );
         assert_eq!(&frontmatter.slug, "excellent-blog-post");
+
+        let mut blocks = parse_blocks(&input[offset..]);
 
         let second_paragraph = blocks.pop().unwrap();
         let first_paragraph = blocks.pop().unwrap();

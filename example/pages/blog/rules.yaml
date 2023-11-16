@@ -3,3 +3,6 @@ layouts:
   - blogpost
 blocks:
   p: fancy-paragraph
+listing:
+  layouts:
+    - post-listings

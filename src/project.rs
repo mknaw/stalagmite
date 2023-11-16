@@ -4,10 +4,19 @@ use std::{env, fs, io};
 
 use chrono::prelude::*;
 use include_dir::{include_dir, Dir};
+use thiserror::Error;
 
 use crate::utils::slugify;
 
 static INIT_ASSETS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/init");
+
+#[derive(Error, Debug)]
+pub enum ProjectError {
+    #[error(transparent)]
+    InitializationError(#[from] io::Error),
+}
+
+type ProjectResult<T> = Result<T, ProjectError>;
 
 // TODO need to de-triplicate with respect to the Frontmatter stuff
 // and then the globals being constructed for use in the template.
@@ -40,6 +49,7 @@ impl PageMeta {
     }
 }
 
+/// Locate the `/pages/` directory in which we expect to find markdown and HTML files.
 fn get_pages_dir() -> io::Result<PathBuf> {
     // TODO should we get this from Config or something?
     let dir = env::current_dir()?;
@@ -70,7 +80,7 @@ fn copy_init_assets(asset_dir: &Dir, fs_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn initialize() -> io::Result<()> {
+pub fn initialize() -> ProjectResult<()> {
     // TODO initialize git repo + `.gitignore`?
     // TODO convert the "already exists" errors to something readable.
     fs::create_dir("pages")?;

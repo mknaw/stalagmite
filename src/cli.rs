@@ -11,12 +11,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a new stalagmite site.
     Init,
+    /// Add a new page, layout, or rule set to the project.
     Add {
         #[command(subcommand)]
         add_command: AddCommand,
     },
+    /// Generate a static site from the current project.
     Gen,
+    /// Run a local development server.
     DevServer,
 }
 
@@ -29,9 +33,18 @@ enum AddCommand {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let cli = Cli::parse();
     match &cli.command {
-        Commands::Init => project::initialize().unwrap(),
+        Commands::Init => match project::initialize() {
+            Ok(_) => println!("Initialized new stalagmite project"),
+            Err(e) => {
+                println!("Error initializing project: {}", e);
+                // TODO should always return with exitcode 1 on error
+                std::process::exit(1);
+            }
+        },
         // TODO (maybe): these path arguments are pretty UNIX centric...
         Commands::Add { add_command } => match add_command {
             AddCommand::Page { path, title } => {

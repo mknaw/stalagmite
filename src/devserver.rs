@@ -28,7 +28,7 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
                 let should_regenerate = events
                     .iter()
                     // TODO may want to specify this path a bit better...
-                    .any(|event| !event.path.starts_with("./public/"));
+                    .any(|event| event.path.is_file() && !event.path.starts_with("./public"));
                 if should_regenerate {
                     tracing::info!("regenerating...");
                     crate::generate();
@@ -42,8 +42,6 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
 }
 
 pub async fn run() {
-    tracing_subscriber::fmt::init();
-
     // build our application with a route
     let app = Router::new().nest_service("/", ServeDir::new("public"));
 
