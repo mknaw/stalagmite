@@ -29,6 +29,8 @@ enum AddCommand {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let cli = Cli::parse();
     match &cli.command {
         Commands::Init => project::initialize().unwrap(),

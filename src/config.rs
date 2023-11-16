@@ -34,4 +34,12 @@ impl Config {
     pub fn blocks_dir(&self) -> PathBuf {
         self.current_dir.join("blocks")
     }
+
+    pub fn pages_dir(&self) -> PathBuf {
+        self.current_dir.join("pages")
+    }
+
+    pub fn out_dir(&self) -> PathBuf {
+        self.current_dir.join("public")
+    }
 }

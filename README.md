@@ -1,11 +1,11 @@
-static site generator, written in Rust. word on the street is every coder ought to make one of these. I'm also sitting
-on all these sites, and they ain't gonna statically generate themselves.
+static site generator, written in Rust. word on the street is every coder worth their salt ought to make one of these. Also, I'm sitting on all these sites, and they ain't gonna statically generate themselves.
 
 
 TODO
-- [ ] check hashes to avoid regenerating unchanged pages
-- [ ] see what can be parallelized
+- [ ] load and liquid render non `.md` files
+- [ ] be able to parse URLs in markdown: `[text](url)`
 - [ ] dev-server autoreload
 - [ ] sitemap
-- [ ] fix overuse of allocations and clones
+- [ ] overuse of unwrap / expect
+- [ ] check hashes to avoid regenerating unchanged pages
 - [ ] testing

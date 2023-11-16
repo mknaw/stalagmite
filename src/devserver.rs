@@ -42,8 +42,6 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
 }
 
 pub async fn run() {
-    tracing_subscriber::fmt::init();
-
     // build our application with a route
     let app = Router::new().nest_service("/", ServeDir::new("public"));
 

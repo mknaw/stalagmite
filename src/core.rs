@@ -1,3 +1,5 @@
+// TODO maybe this should be named `core`?
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,26 +13,65 @@ lazy_static! {
     pub static ref DEFAULT_RENDER_RULE_SET: Arc<RenderRuleSet> = Arc::new(RenderRuleSet {
         layouts: vec!["primary".to_string()],
         block_rules: None,
+        listing: None,
     });
 }
 
-// TODO should this even be defined here at this point?
 #[derive(Debug)]
-pub struct Page {
-    pub path: PathBuf,
-    pub frontmatter: FrontMatter,
-    pub blocks: Vec<Block>,
-    pub render_rules: Arc<RenderRuleSet>,
+pub enum FileType {
+    Markdown,
+    Liquid,
+    Html,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug)]
+pub struct FileEntry {
+    pub abs_path: PathBuf,
+    pub rel_path: PathBuf,
+    pub ftype: FileType,
+}
+
+/// Contains one level of the site hierarchy.
+/// By design, each entry in the level shares the same `RenderRuleSet`.
+/// We may want to process entries of a given layer in sequence, since we may need to generate
+/// listings pages as well, but otherwise, after the initial collection, `GenerationNode`s can
+/// be processed in parallel.
+#[derive(Debug)]
+pub struct GenerationNode {
+    // TODO still needed? Feels like one could get away with just the info on `FileEntry`.
+    pub dir_path: String,
+    pub rules: Arc<RenderRuleSet>,
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarkdownPage {
+    pub dir_path: PathBuf, // TODO must one really be `String` and the other `PathBuf`?
+    pub frontmatter: FrontMatter,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderRuleSet {
     pub layouts: Vec<String>,
     #[serde(rename = "blocks")]
     pub block_rules: Option<HashMap<String, String>>,
+    pub listing: Option<ListingRuleSet>,
 }
 
-#[derive(Debug, PartialEq)]
+impl RenderRuleSet {
+    pub fn should_render_listing(&self) -> bool {
+        self.listing.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListingRuleSet {
+    pub layouts: Vec<String>,
+    pub page_size: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Block {
     pub kind: String, // TODO want to avoid alloc here!
     pub tokens: Vec<Token>,
@@ -39,13 +80,14 @@ pub struct Block {
 }
 
 // TODO "token" isn't really a great name for these.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Token {
     Literal(String),
     Block(Block),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+// TODO really might be interested in calling this `PageMetadata` or something
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrontMatter {
     pub title: String,
     pub timestamp: DateTime<Utc>,
@@ -82,3 +124,6 @@ impl TryFrom<HashMap<&str, &str>> for FrontMatter {
         })
     }
 }
+
+/// Represents "page `i` of `n`".
+pub type PageIndex = (usize, usize);
