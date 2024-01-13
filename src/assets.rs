@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use thiserror::Error;
 
+use crate::utils;
+
 // TODO probably should be using seemingly better `tailwind-rs` instead of `railwind`.
 // that comes with its own problems, like wanting HTML files to parse instead of
 // just regexing the classes from the liquids. but it does other things better.
@@ -16,13 +18,12 @@ pub enum StyleError {}
 /// Generate a name that includes a hash of the contents.
 fn make_cache_busted_name(path: &Path, contents: &[u8]) -> OsString {
     let stem = path.file_stem().unwrap();
-    let hash = seahash::hash(contents);
     let ext = path.extension().unwrap();
 
     OsString::from(format!(
-        "{}.{:016x}.{}",
+        "{}.{}.{}",
         stem.to_str().unwrap(),
-        hash,
+        utils::hash(contents),
         ext.to_str().unwrap()
     ))
 }

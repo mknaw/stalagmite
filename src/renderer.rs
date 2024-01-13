@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::{env, fs};
+use std::fs;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use chrono::prelude::*;
 use liquid::partials::{EagerCompiler, InMemorySource};
@@ -9,7 +9,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::{Block, PageIndex, RenderRuleSet, Token};
+use crate::core::{Block, Page, PageFile, PageIndex, RenderRules, Token};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -26,14 +26,6 @@ pub enum RenderError {
 
 type RenderResult<T> = Result<T, RenderError>;
 
-pub struct Renderer {
-    parser: Parser,
-    // TODO do we really want to have all layouts in memory at generation time?
-    layouts: HashMap<String, Template>,
-    blocks: HashMap<String, Template>,
-    tailwind_filename: String,
-}
-
 fn make_partial_key(partial_path: &Path, current_dir: &Path) -> String {
     partial_path
         .strip_prefix(current_dir)
@@ -41,17 +33,6 @@ fn make_partial_key(partial_path: &Path, current_dir: &Path) -> String {
         .to_str()
         .unwrap()
         .to_owned()
-}
-
-// TODO pointless to walk & search for '.liquid' 3x - 2x here and then also in `generator.rs`
-// for supplying an arg to `railwind`.
-fn collect_partials(dir: &Path) -> Partials {
-    let mut partials = Partials::empty();
-    diskio::walk(dir, "liquid").for_each(|path| {
-        let layout = fs::read_to_string(&path).unwrap();
-        partials.add(make_partial_key(&path, dir), layout);
-    });
-    partials
 }
 
 /// Helper fn for collecting layouts from a directory.
@@ -80,7 +61,11 @@ enum Renderable<'a> {
 }
 
 impl Renderable<'_> {
-    fn render(&self, renderer: &Renderer, render_rules: &Arc<RenderRuleSet>) -> String {
+    fn render<R: Deref<Target = RenderRules>>(
+        &self,
+        renderer: &Renderer,
+        render_rules: &R,
+    ) -> String {
         match self {
             Self::Markdown(markdown) => renderer.render_blocks(markdown, render_rules),
             Self::Html(html) => html.to_string(),
@@ -125,30 +110,45 @@ impl From<&Markdown> for ListingEntry {
             title: markdown.frontmatter.title.clone(),
             timestamp: markdown.frontmatter.timestamp,
             slug: markdown.frontmatter.slug.clone(),
-            link: format!(
-                "/{}/{}/",
-                markdown.dir_path.to_str().unwrap(),
-                markdown.frontmatter.slug
-            ),
+            link: todo!(),
             blocks: markdown.blocks.clone(),
         }
     }
 }
 
+pub struct Renderer {
+    // TODO do we really want to have all layouts in memory at generation time?
+    layouts: HashMap<String, Template>,
+    blocks: HashMap<String, Template>,
+    tailwind_filename: String,
+}
+
 impl Renderer {
-    pub fn new(config: &Config, css_file_name: String) -> Self {
+    pub fn new(config: &Config, css_file_name: String, partials: &[PathBuf]) -> Self {
+        let partials = partials
+            .iter()
+            .fold(Partials::empty(), |mut partials, path| {
+                let layout = fs::read_to_string(&path).unwrap();
+                partials.add(make_partial_key(&path, &config.project_dir), layout);
+                partials
+            });
+
         let parser = ParserBuilder::with_stdlib()
             // TODO don't think this is needed as is... but maybe interesting soon.
-            .filter(crate::liquid::filters::FirstBlockOfKind)
+            .partials(partials)
             .tag(crate::liquid::tags::RenderBlockTag)
             .tag(crate::liquid::tags::TailwindTag)
-            .partials(collect_partials(&env::current_dir().unwrap()))
+            .filter(crate::liquid::filters::FirstBlockOfKind)
             .build()
             .unwrap();
+
+        // TODO this is really stupid, since we already have this available in `partials`,
+        // and we've even done all the reading of those files etc.
+        // Or maybe partials should really be partials and these things are kept as templates.
         let layouts = collect_template_map(&parser, &config.layouts_dir());
         let blocks = collect_template_map(&parser, &config.blocks_dir());
+
         Self {
-            parser,
             layouts,
             blocks,
             tailwind_filename: css_file_name,
@@ -162,20 +162,32 @@ impl Renderer {
             .unwrap_or_else(|| panic!("could not locate layout: {}", template_name))
     }
 
-    pub fn render<P: AsRef<Path>>(&self, path: P) -> RenderResult<String> {
-        let raw = fs::read_to_string(&path).unwrap();
-        let template = self.parser.parse(raw.trim()).unwrap();
-        let globals = liquid::object!({
-            // TODO should be constants for these, since it's used in the tag.
-            TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
-        });
-        template.render(&globals).map_err(|e| e.into())
+    pub fn render_page<R: Deref<Target = RenderRules>>(
+        &self,
+        page: &Page,
+        render_rules: &R,
+    ) -> RenderResult<String> {
+        match page {
+            Page::Markdown(page) => self.render_markdown(&page.file, &page.markdown, render_rules),
+            Page::Liquid(_) => unimplemented!(),
+            Page::Html(page) => self.render_html(page.get_contents().unwrap(), render_rules),
+        }
     }
 
-    pub fn render_listing_page(
+    // pub fn render<P: AsRef<Path>>(&self, path: P) -> RenderResult<String> {
+    //     let raw = fs::read_to_string(&path).unwrap();
+    //     let template = self.parser.parse(raw.trim()).unwrap();
+    //     let globals = liquid::object!({
+    //         // TODO should be constants for these, since it's used in the tag.
+    //         TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
+    //     });
+    //     template.render(&globals).map_err(|e| e.into())
+    // }
+
+    pub fn render_listing_page<R: Deref<Target = RenderRules>>(
         &self,
         pages: &[Markdown],
-        render_rules: &Arc<RenderRuleSet>,
+        render_rules: &R,
         page_index: PageIndex,
     ) -> RenderResult<String> {
         // TODO feels like the parsing of blocks within the markdown should be lazy,
@@ -214,35 +226,36 @@ impl Renderer {
 
     // TODO not sure `render` has to know that it is `Arc`,
     // probably here is where one uses a `Deref to RenderRuleSet` kind of pattern.
-    pub fn render_markdown(
+    fn render_markdown<R: Deref<Target = RenderRules>>(
         &self,
+        page_file: &PageFile,
         markdown: &Markdown,
-        render_rules: &Arc<RenderRuleSet>,
+        render_rules: &R,
     ) -> RenderResult<String> {
         tracing::debug!(
-            "rendering {}/{}",
-            markdown.dir_path.to_str().unwrap(),
+            "rendering {:?}/{}",
+            page_file.rel_dir(),
             markdown.frontmatter.slug
         );
-        let layout_stack = &render_rules.clone().layouts[..];
+        let layout_stack = &render_rules.layouts[..];
         self.render_content(&Renderable::Markdown(markdown), render_rules, layout_stack)
     }
 
-    pub fn render_html(
+    fn render_html<R: Deref<Target = RenderRules>>(
         &self,
         html: &str,
-        render_rules: &Arc<RenderRuleSet>,
+        render_rules: &R,
     ) -> RenderResult<String> {
-        let layout_stack = &render_rules.clone().layouts[..];
+        let layout_stack = &render_rules.layouts[..];
         self.render_content(&Renderable::Html(html), render_rules, layout_stack)
     }
 
     // Recursively render liquid templates, allowing specification of nested layouts.
     // TODO nicer to pass an iterator over layouts perhaps, instead of a slice
-    fn render_content(
+    fn render_content<R: Deref<Target = RenderRules>>(
         &self,
         renderable: &Renderable,
-        render_rules: &Arc<RenderRuleSet>,
+        render_rules: &R,
         layout_stack: &[String],
     ) -> RenderResult<String> {
         assert!(!layout_stack.is_empty());
@@ -267,17 +280,25 @@ impl Renderer {
     }
 
     // TODO should be a `Result`.
-    fn render_blocks(&self, page: &Markdown, render_rules: &Arc<RenderRuleSet>) -> String {
+    fn render_blocks<R: Deref<Target = RenderRules>>(
+        &self,
+        page: &Markdown,
+        render_rules: &R,
+    ) -> String {
         page.blocks
             .iter()
-            .map(|block| self.render_block(block, render_rules.clone()))
+            .map(|block| self.render_block(block, render_rules))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     // TODO probably really should be a template tag?
     // it would certainly make it easier to render some block in a listing page...
-    fn render_block(&self, block: &Block, render_rules: Arc<RenderRuleSet>) -> String {
+    fn render_block<R: Deref<Target = RenderRules>>(
+        &self,
+        block: &Block,
+        render_rules: &R,
+    ) -> String {
         let template_name = render_rules
             .block_rules
             .as_ref()
@@ -292,7 +313,7 @@ impl Renderer {
             "content": block.tokens.iter().map(|token| {
                 match token {
                     Token::Literal(text) => text.clone(),
-                    Token::Block(nested) => self.render_block(nested, render_rules.clone()),
+                    Token::Block(nested) => self.render_block(nested, render_rules),
                 }
             }).collect::<Vec<_>>().join(""),
         });

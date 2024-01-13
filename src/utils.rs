@@ -9,6 +9,11 @@ pub fn slugify(s: &str) -> String {
         .collect()
 }
 
+/// Hash the given `bytes`.
+pub fn hash(bytes: &[u8]) -> String {
+    format!("{:016x}", seahash::hash(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

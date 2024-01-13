@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use ignore::Walk;
 use memmap2::Mmap;
 
-use crate::core::{FileType, PageFile, RenderRuleSet, SiteNode, DEFAULT_RENDER_RULE_SET};
+use crate::core::{PageFile, RenderRules, SiteNode, DEFAULT_RENDER_RULE_SET};
 use crate::Config;
 
 /// Read a `path` to an `Mmap`.
@@ -29,23 +28,22 @@ pub fn walk<'a, P: AsRef<Path>>(dir: P, ext: &'a str) -> Box<dyn Iterator<Item =
 }
 
 /// Recursively iterate over pages directory, sending data pertaining to each directory to a `sink`.
-pub fn collect_generation_nodes(config: Arc<Config>, sink: Sender<SiteNode>) {
-    let mut rules_stack = vec![DEFAULT_RENDER_RULE_SET.clone()];
-    let pages_dir = config.pages_dir();
-    recurse(&pages_dir, &pages_dir, &mut rules_stack, &sink);
-
+/// Technically the site topology is a tree, but currently have no need to represent it as such.
+pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
+    // TODO probably could do less hand rolling if we just walkdir, get directories, and then
+    // output a `SiteNode` for each of those.
     fn recurse(
+        site_nodes: &mut Vec<SiteNode>,
         pages_dir: &Path,
         current_path: &Path,
-        rules_stack: &mut Vec<Arc<RenderRuleSet>>,
-        tx: &Sender<SiteNode>,
+        rules_stack: &mut Vec<Arc<RenderRules>>,
     ) {
         let rules_path = current_path.join("rules.yaml");
         if rules_path.exists() && rules_path.is_file() {
             let raw = fs::read_to_string(&rules_path).unwrap();
             // TODO wanted to override the previous rules on the stack...
             // TODO might not need Arc anymore, now that SiteNodes own the RuleSets?
-            let rule_set: Arc<RenderRuleSet> = Arc::new(serde_yaml::from_str(&raw).unwrap());
+            let rule_set: Arc<RenderRules> = Arc::new(serde_yaml::from_str(&raw).unwrap());
             rules_stack.push(rule_set);
         }
 
@@ -55,33 +53,19 @@ pub fn collect_generation_nodes(config: Arc<Config>, sink: Sender<SiteNode>) {
                 .collect();
             let page_files: Vec<PageFile> = paths
                 .iter()
-                .filter_map(|path| match path.extension().and_then(|ext| ext.to_str()) {
-                    Some("md") => Some((path.to_owned(), FileType::Markdown)),
-                    Some("liquid") => Some((path.to_owned(), FileType::Liquid)),
-                    Some("html") => Some((path.to_owned(), FileType::Html)),
-                    _ => None,
-                })
-                .map(|(abs_path, ftype)| {
-                    let rel_path = abs_path.strip_prefix(pages_dir).unwrap().to_owned();
-                    PageFile {
-                        abs_path,
-                        rel_path,
-                        ftype,
-                    }
-                })
+                .filter_map(|path| PageFile::try_new(pages_dir, path).ok())
                 .collect();
 
             if !page_files.is_empty() {
-                tx.send(SiteNode {
+                site_nodes.push(SiteNode {
                     dir: current_path.strip_prefix(pages_dir).unwrap().to_path_buf(),
-                    rules: rules_stack.last().expect("rules_stack is empty").clone(),
-                    entries: page_files,
-                })
-                .unwrap();
+                    render_rules: rules_stack.last().expect("rules_stack is empty").clone(),
+                    page_files,
+                });
             }
 
             paths.iter().filter(|path| path.is_dir()).for_each(|path| {
-                recurse(pages_dir, path, rules_stack, tx);
+                recurse(site_nodes, pages_dir, path, rules_stack);
             });
         }
 
@@ -90,20 +74,20 @@ pub fn collect_generation_nodes(config: Arc<Config>, sink: Sender<SiteNode>) {
             rules_stack.pop();
         }
     }
+
+    let mut site_nodes: Vec<SiteNode> = Vec::new();
+    let mut rules_stack = vec![DEFAULT_RENDER_RULE_SET.clone()];
+    let pages_dir = config.pages_dir();
+    recurse(&mut site_nodes, &pages_dir, &pages_dir, &mut rules_stack);
+    site_nodes
 }
 
 // TODO this P, P2 thing is unseemly.
 // TODO should callers just take care of joining the path?
 // TODO probably also want to minify + compress
-pub fn write_html<P: AsRef<Path>, P2: AsRef<Path>>(
-    out_dir_path: P,
-    rel_path: P2,
-    html: &str,
-) -> PathBuf {
-    let mut path = out_dir_path.as_ref().join(rel_path.as_ref());
-    // let mut path = PathBuf::from("./public/").join(path);
-    fs::create_dir_all(&path).unwrap();
-    path.push("index.html");
-    fs::write(&path, html).unwrap();
-    path
+pub fn write_html<P: AsRef<Path>>(out_path: P, html: &str) -> anyhow::Result<()> {
+    tracing::debug!("Writing HTML to {}", out_path.as_ref().display());
+    fs::create_dir_all(out_path.as_ref().parent().unwrap()).unwrap();
+    fs::write(&out_path, html)?;
+    Ok(())
 }

@@ -9,37 +9,39 @@ pub enum ConfigError {
 }
 
 pub struct Config {
-    pub current_dir: PathBuf,
+    pub project_dir: PathBuf,
     pub outdir: PathBuf,
 }
 
 impl Config {
     pub fn init() -> Result<Self, ConfigError> {
-        let current_dir = std::env::current_dir().unwrap();
-        let outdir = current_dir.join("public");
+        let project_dir = std::env::current_dir().unwrap();
+        let outdir = project_dir.join("public");
         // TODO the creation of outdir probably should happen somewhere else.
         if !outdir.is_dir() {
             std::fs::create_dir_all(&outdir).unwrap();
         }
         Ok(Self {
-            current_dir,
+            project_dir,
             outdir,
         })
     }
 
     pub fn layouts_dir(&self) -> PathBuf {
-        self.current_dir.join("layouts")
+        self.project_dir.join("layouts")
     }
 
     pub fn blocks_dir(&self) -> PathBuf {
-        self.current_dir.join("blocks")
+        self.project_dir.join("blocks")
     }
 
+    // TODO `partials_dir`?
+
     pub fn pages_dir(&self) -> PathBuf {
-        self.current_dir.join("pages")
+        self.project_dir.join("pages")
     }
 
     pub fn out_dir(&self) -> PathBuf {
-        self.current_dir.join("public")
+        self.project_dir.join("public")
     }
 }

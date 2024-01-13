@@ -83,6 +83,7 @@ fn copy_init_assets(asset_dir: &Dir, fs_dir: &Path) -> io::Result<()> {
 pub fn initialize() -> ProjectResult<()> {
     // TODO initialize git repo + `.gitignore`?
     // TODO convert the "already exists" errors to something readable.
+    // TODO initalize sqlite cache
     fs::create_dir("pages")?;
     copy_init_assets(&INIT_ASSETS_DIR, &env::current_dir()?)?;
     Ok(())

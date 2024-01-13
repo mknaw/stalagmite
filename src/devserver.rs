@@ -10,11 +10,9 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let backend_config = notify::Config::default().with_poll_interval(Duration::from_secs(1));
-    // debouncer configuration
     let debouncer_config = notify_debouncer_mini::Config::default()
         .with_timeout(Duration::from_millis(1000))
         .with_notify_config(backend_config);
-    // select backend via fish operator, here PollWatcher backend
     let mut debouncer = new_debouncer_opt::<_, notify::PollWatcher>(debouncer_config, tx).unwrap();
 
     debouncer
@@ -31,7 +29,7 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
                     .any(|event| event.path.is_file() && !event.path.starts_with("./public"));
                 if should_regenerate {
                     tracing::info!("regenerating...");
-                    crate::generate();
+                    crate::generate().unwrap();
                 }
             }
             Err(error) => println!("Error: {error:?}"),

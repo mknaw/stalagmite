@@ -1,14 +1,15 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::utils;
 use crate::utils::slugify;
 
 lazy_static! {
-    pub static ref DEFAULT_RENDER_RULE_SET: Arc<RenderRuleSet> = Arc::new(RenderRuleSet {
+    pub static ref DEFAULT_RENDER_RULE_SET: Arc<RenderRules> = Arc::new(RenderRules {
         layouts: vec!["primary".to_string()],
         block_rules: None,
         listing: None,
@@ -16,23 +17,62 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone)]
-pub enum FileType {
+pub enum PageType {
     Markdown,
     Liquid,
     Html,
 }
 
+// TODO replace this with a VPath that knows more about where it should be output?
+/// Representation of the filesystem path of a page to render.
 #[derive(Debug, Clone)]
 pub struct PageFile {
+    // TODO not sure I really want the rel_path, abs_path thing...
     // Absolute path of the file.
     pub abs_path: PathBuf,
     // Path relative to the pages directory.
     pub rel_path: PathBuf,
-    // The domain-specific type of the file.
-    pub ftype: FileType,
+    // Desired output path, relative to the output directory.
+    pub out_path: PathBuf,
+    // Cached file contents.
+    pub contents: OnceLock<String>,
+    // Cached content hash.
+    pub hash: OnceLock<String>,
 }
 
 impl PageFile {
+    pub fn try_new<P: AsRef<Path>>(pages_dir: P, path: P) -> anyhow::Result<Self> {
+        let abs_path = path.as_ref().to_path_buf();
+        if matches!(
+            abs_path.extension().and_then(|ext| ext.to_str()),
+            Some("md") | Some("liquid") | Some("html")
+        ) {
+            let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
+            let mut out_path = rel_path.clone();
+            out_path.set_extension("html");
+            tracing::info!("out_path: {:?}", out_path);
+            Ok(Self {
+                abs_path,
+                rel_path,
+                out_path,
+                contents: OnceLock::new(),
+                hash: OnceLock::new(),
+            })
+        } else {
+            anyhow::bail!("Invalid file type")
+        }
+    }
+
+    /// Returns the type of the file.
+    pub fn get_page_type(&self) -> PageType {
+        match self.abs_path.extension().and_then(|ext| ext.to_str()) {
+            Some("md") => PageType::Markdown,
+            Some("liquid") => PageType::Liquid,
+            Some("html") => PageType::Html,
+            _ => panic!("Unknown file type"),
+        }
+    }
+
     /// Returns the absolute path of the directory containing the file.
     pub fn abs_dir(&self) -> PathBuf {
         self.abs_path.parent().unwrap().to_owned()
@@ -41,6 +81,63 @@ impl PageFile {
     /// Returns the relative path of the directory containing the file.
     pub fn rel_dir(&self) -> PathBuf {
         self.rel_path.parent().unwrap().to_owned()
+    }
+
+    pub fn get_contents(&self) -> anyhow::Result<&str> {
+        self.contents
+            .get_or_try_init(|| {
+                std::fs::read(&self.abs_path)
+                    .map(|c| std::str::from_utf8(&c).unwrap().to_string())
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .map(|c| c.as_str())
+    }
+
+    pub fn get_hash(&self) -> anyhow::Result<&str> {
+        self.hash
+            .get_or_try_init(|| {
+                let contents = self.get_contents()?;
+                Ok(utils::hash(contents.as_bytes()))
+            })
+            .map(|h| h.as_str())
+    }
+}
+
+#[derive(Debug)]
+pub enum Page {
+    Markdown(MarkdownPage),
+    Liquid(PageFile),
+    Html(PageFile),
+}
+
+#[derive(Debug)]
+pub struct MarkdownPage {
+    pub file: PageFile,
+    pub markdown: Markdown,
+}
+
+trait GenericPage {
+    fn get_url(&self) -> String;
+}
+
+impl Page {
+    pub fn new_markdown_page(file: PageFile, markdown: Markdown) -> Self {
+        Self::Markdown(MarkdownPage { file, markdown })
+    }
+
+    // TODO verify that data matches file.file_type?
+    pub fn get_url(&self) -> String {
+        match self {
+            Self::Markdown(page) => {
+                format!(
+                    "{:?}/{}",
+                    page.file.rel_dir(),
+                    page.markdown.frontmatter.slug
+                )
+            }
+            Self::Liquid(_) => unimplemented!(),
+            Self::Html(file) => file.rel_path.to_string_lossy().to_string(),
+        }
     }
 }
 
@@ -53,27 +150,26 @@ impl PageFile {
 pub struct SiteNode {
     // TODO still needed? Feels like one could get away with just the info on `FileEntry`.
     pub dir: PathBuf,
-    pub rules: Arc<RenderRuleSet>,
-    pub entries: Vec<PageFile>,
+    pub render_rules: Arc<RenderRules>,
+    pub page_files: Vec<PageFile>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Markdown {
-    pub dir_path: PathBuf,
     pub frontmatter: FrontMatter,
     pub blocks: Vec<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RenderRuleSet {
+pub struct RenderRules {
     pub layouts: Vec<String>,
     #[serde(rename = "blocks")]
     pub block_rules: Option<HashMap<String, String>>,
     pub listing: Option<ListingRuleSet>,
 }
 
-impl RenderRuleSet {
-    pub fn should_render_list(&self) -> bool {
+impl RenderRules {
+    pub fn should_render_listing(&self) -> bool {
         self.listing.is_some()
     }
 }
@@ -84,7 +180,7 @@ pub struct ListingRuleSet {
     pub page_size: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Block {
     pub kind: String, // TODO want to avoid alloc here!
     pub tokens: Vec<Token>,
@@ -93,7 +189,7 @@ pub struct Block {
 }
 
 // TODO "token" isn't really a great name for these.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum Token {
     Literal(String),
     Block(Block),

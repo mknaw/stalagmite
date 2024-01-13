@@ -1,3 +1,6 @@
+#![feature(once_cell_try)]
+#![feature(let_chains)]
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -18,8 +21,9 @@ pub(crate) mod liquid {
     }
 }
 pub(crate) mod assets;
+pub(crate) mod cache;
 pub(crate) mod core;
-pub(crate) mod markdown;
+pub(crate) mod parsers;
 pub mod project;
 mod renderer;
 mod utils;

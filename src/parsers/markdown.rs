@@ -10,6 +10,7 @@ use nom::IResult;
 use thiserror::Error;
 
 use crate::core::{Block, FrontMatter, Token};
+use crate::Markdown;
 
 type MarkdownResult<T> = Result<T, MarkdownError>;
 
@@ -19,6 +20,16 @@ pub enum MarkdownError {
     IoError(#[from] std::io::Error),
     #[error("parsing error")]
     ParseError,
+}
+
+// TODO should probably just operate on &str, since I've already decoded contents
+pub fn parse(contents: &[u8]) -> MarkdownResult<Markdown> {
+    let (frontmatter, offset) = parse_frontmatter(contents)?;
+    let blocks = parse_blocks(&contents[offset..]);
+    Ok(Markdown {
+        frontmatter,
+        blocks,
+    })
 }
 
 pub fn parse_frontmatter(contents: &[u8]) -> MarkdownResult<(FrontMatter, usize)> {
