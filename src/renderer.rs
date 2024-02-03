@@ -9,7 +9,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::{Block, Page, PageFile, PageIndex, RenderRules, Token};
+use crate::core::{Block, Page, PageData, PageFile, PageIndex, RenderRules, Token};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -103,15 +103,17 @@ struct ListingEntry {
     pub blocks: Vec<Block>,
 }
 
-impl From<&Markdown> for ListingEntry {
-    fn from(markdown: &Markdown) -> Self {
-        // TODO not really liking the clone here!
-        Self {
-            title: markdown.frontmatter.title.clone(),
-            timestamp: markdown.frontmatter.timestamp,
-            slug: markdown.frontmatter.slug.clone(),
-            link: todo!(),
-            blocks: markdown.blocks.clone(),
+impl From<&Page> for ListingEntry {
+    fn from(page: &Page) -> Self {
+        match &page.data {
+            PageData::Markdown(md) => Self {
+                title: md.frontmatter.title.clone(),
+                timestamp: md.frontmatter.timestamp,
+                slug: md.frontmatter.slug.clone(),
+                link: page.get_link(),
+                blocks: md.blocks.clone(),
+            },
+            _ => unimplemented!(),
         }
     }
 }
@@ -128,8 +130,8 @@ impl Renderer {
         let partials = partials
             .iter()
             .fold(Partials::empty(), |mut partials, path| {
-                let layout = fs::read_to_string(&path).unwrap();
-                partials.add(make_partial_key(&path, &config.project_dir), layout);
+                let layout = fs::read_to_string(path).unwrap();
+                partials.add(make_partial_key(path, &config.project_dir), layout);
                 partials
             });
 
@@ -167,26 +169,16 @@ impl Renderer {
         page: &Page,
         render_rules: &R,
     ) -> RenderResult<String> {
-        match page {
-            Page::Markdown(page) => self.render_markdown(&page.file, &page.markdown, render_rules),
-            Page::Liquid(_) => unimplemented!(),
-            Page::Html(page) => self.render_html(page.get_contents().unwrap(), render_rules),
+        match &page.data {
+            PageData::Markdown(md) => self.render_markdown(&page.file, md, render_rules),
+            PageData::Liquid => unimplemented!(),
+            PageData::Html => self.render_html(page.file.get_contents().unwrap(), render_rules),
         }
     }
 
-    // pub fn render<P: AsRef<Path>>(&self, path: P) -> RenderResult<String> {
-    //     let raw = fs::read_to_string(&path).unwrap();
-    //     let template = self.parser.parse(raw.trim()).unwrap();
-    //     let globals = liquid::object!({
-    //         // TODO should be constants for these, since it's used in the tag.
-    //         TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
-    //     });
-    //     template.render(&globals).map_err(|e| e.into())
-    // }
-
     pub fn render_listing_page<R: Deref<Target = RenderRules>>(
         &self,
-        pages: &[Markdown],
+        pages: &[Page],
         render_rules: &R,
         page_index: PageIndex,
     ) -> RenderResult<String> {

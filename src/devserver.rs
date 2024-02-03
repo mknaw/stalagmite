@@ -6,7 +6,8 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer_opt;
 use tower_http::services::ServeDir;
 
-fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+// TODO this is async-colored from `generate`, but doesn't actually exploit async otherwise
+async fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let backend_config = notify::Config::default().with_poll_interval(Duration::from_secs(1));
@@ -29,7 +30,7 @@ fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
                     .any(|event| event.path.is_file() && !event.path.starts_with("./public"));
                 if should_regenerate {
                     tracing::info!("regenerating...");
-                    crate::generate().unwrap();
+                    crate::generate().await.unwrap();
                 }
             }
             Err(error) => println!("Error: {error:?}"),
@@ -44,7 +45,7 @@ pub async fn run() {
     let app = Router::new().nest_service("/", ServeDir::new("public"));
 
     tokio::spawn(async move {
-        watch(".").unwrap();
+        watch(".").await.unwrap();
     });
 
     // run our app with hyper, listening globally on port 3000

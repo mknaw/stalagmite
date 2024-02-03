@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +9,7 @@ use crate::Config;
 
 /// Read a `path` to an `Mmap`.
 pub fn read_file_contents<P: AsRef<Path>>(path: P) -> Mmap {
-    let file = fs::File::open(path).unwrap();
+    let file = std::fs::File::open(path).unwrap();
     unsafe { Mmap::map(&file).unwrap() }
 }
 
@@ -40,14 +39,14 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
     ) {
         let rules_path = current_path.join("rules.yaml");
         if rules_path.exists() && rules_path.is_file() {
-            let raw = fs::read_to_string(&rules_path).unwrap();
+            let raw = std::fs::read_to_string(&rules_path).unwrap();
             // TODO wanted to override the previous rules on the stack...
             // TODO might not need Arc anymore, now that SiteNodes own the RuleSets?
             let rule_set: Arc<RenderRules> = Arc::new(serde_yaml::from_str(&raw).unwrap());
             rules_stack.push(rule_set);
         }
 
-        if let Ok(dir_entries) = fs::read_dir(current_path) {
+        if let Ok(dir_entries) = std::fs::read_dir(current_path) {
             let paths: Vec<PathBuf> = dir_entries
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect();
@@ -85,9 +84,9 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
 // TODO this P, P2 thing is unseemly.
 // TODO should callers just take care of joining the path?
 // TODO probably also want to minify + compress
-pub fn write_html<P: AsRef<Path>>(out_path: P, html: &str) -> anyhow::Result<()> {
+pub async fn write_html<P: AsRef<Path>>(out_path: P, html: &str) -> anyhow::Result<()> {
     tracing::debug!("Writing HTML to {}", out_path.as_ref().display());
-    fs::create_dir_all(out_path.as_ref().parent().unwrap()).unwrap();
-    fs::write(&out_path, html)?;
+    tokio::fs::create_dir_all(out_path.as_ref().parent().unwrap()).await?;
+    tokio::fs::write(&out_path, html).await?;
     Ok(())
 }

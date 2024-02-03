@@ -71,22 +71,24 @@ pub fn restore_cached(
     page_file: PageFile,
 ) -> anyhow::Result<Option<(Page, String)>> {
     let query_result = match page_file.get_page_type() {
-        PageType::Markdown => restore_cached_markdown(conn, &page_file)?.map(|(md, rendered)| {
-            (
-                Page::Markdown(MarkdownPage {
-                    file: page_file,
-                    markdown: md,
-                }),
-                rendered,
-            )
-        }),
-        PageType::Liquid => restore_cached_page(conn, &page_file)?
-            .map(|rendered| (Page::Liquid(page_file), rendered)),
+        PageType::Markdown => restore_cached_markdown(conn, &page_file)?
+            .map(|(md, rendered)| (PageData::Markdown(md), rendered)),
+        PageType::Liquid => {
+            restore_cached_page(conn, &page_file)?.map(|rendered| (PageData::Liquid, rendered))
+        }
         PageType::Html => {
-            restore_cached_page(conn, &page_file)?.map(|rendered| (Page::Html(page_file), rendered))
+            restore_cached_page(conn, &page_file)?.map(|rendered| (PageData::Html, rendered))
         }
     };
-    Ok(query_result)
+    Ok(query_result.map(|(data, rendered)| {
+        (
+            Page {
+                file: page_file,
+                data,
+            },
+            rendered,
+        )
+    }))
 }
 
 /// Perform a query to fetch cached data for `Markdown` construction.
@@ -131,16 +133,21 @@ fn restore_cached_page(conn: &Connection, page_file: &PageFile) -> Result<Option
 }
 
 pub fn cache(conn: &Connection, page: &Page, rendered: &str) -> anyhow::Result<()> {
-    match page {
-        Page::Markdown(markdown_page) => cache_markdown(conn, markdown_page, rendered),
-        Page::Liquid(page_file) => cache_page(conn, page_file, rendered),
-        Page::Html(page_file) => cache_page(conn, page_file, rendered),
+    match &page.data {
+        PageData::Markdown(md) => cache_markdown(conn, &page.file, md, rendered),
+        PageData::Liquid => cache_page(conn, &page.file, rendered),
+        PageData::Html => cache_page(conn, &page.file, rendered),
     }
 }
 
-fn cache_markdown(conn: &Connection, page: &MarkdownPage, rendered: &str) -> anyhow::Result<()> {
-    let frontmatter = serde_yaml::to_string(&page.markdown.frontmatter).unwrap();
-    let blocks = serde_yaml::to_string(&page.markdown.blocks).unwrap();
+fn cache_markdown(
+    conn: &Connection,
+    page_file: &PageFile,
+    markdown: &Markdown,
+    rendered: &str,
+) -> anyhow::Result<()> {
+    let frontmatter = serde_yaml::to_string(&markdown.frontmatter).unwrap();
+    let blocks = serde_yaml::to_string(&markdown.blocks).unwrap();
     conn.execute(
         "INSERT INTO markdowns (path, hash, timestamp, frontmatter, blocks, rendered)
          VALUES (:path, :hash, :timestamp, :frontmatter, :blocks, :rendered)
@@ -151,9 +158,9 @@ fn cache_markdown(conn: &Connection, page: &MarkdownPage, rendered: &str) -> any
                 frontmatter = excluded.frontmatter
         ",
         named_params! {
-            ":path": page.file.rel_path.to_str().unwrap(),
-            ":hash": page.file.get_hash().unwrap(),
-            ":timestamp": page.markdown.frontmatter.timestamp.timestamp(),
+            ":path": page_file.rel_path.to_str().unwrap(),
+            ":hash": page_file.get_hash().unwrap(),
+            ":timestamp": markdown.frontmatter.timestamp.timestamp(),
             ":frontmatter": &frontmatter,
             ":blocks": &blocks,
             ":rendered": rendered,

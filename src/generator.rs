@@ -1,13 +1,14 @@
-use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::{fs, thread};
 
 use anyhow::anyhow;
 use rayon::prelude::*;
 use tempdir::TempDir;
-use tracing::instrument;
+use tokio::task::JoinSet;
 
 use crate::core::*;
 use crate::parsers::markdown;
@@ -209,13 +210,10 @@ fn parse_page(page_file: PageFile) -> anyhow::Result<Page> {
         PageType::Markdown => {
             let contents = page_file.get_contents()?;
             let markdown = markdown::parse(contents.as_bytes())?;
-            Ok(Page::Markdown(MarkdownPage {
-                file: page_file,
-                markdown,
-            }))
+            Ok(Page::new_markdown_page(page_file, markdown))
         }
-        PageType::Liquid => Ok(Page::Liquid(page_file)),
-        PageType::Html => Ok(Page::Html(page_file)),
+        PageType::Liquid => Ok(Page::new_liquid_page(page_file)),
+        PageType::Html => Ok(Page::new_html_page(page_file)),
     }
 }
 
@@ -227,6 +225,7 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     let previous_path = config.out_dir().join(&page_file.out_path);
     if previous_path.metadata()?.is_file() {
         let current_path = staging_dir.as_ref().join(&page_file.out_path);
+        tracing::warn!("out_path {:?}", page_file.out_path);
         fs::create_dir_all(current_path.parent().unwrap())?;
         fs::copy(&previous_path, current_path)?;
         Ok(())
@@ -238,73 +237,12 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     }
 }
 
-#[instrument(skip(config, pool, renderer, staging_dir, templates_were_modified))]
-fn handle_site_node<C: Deref<Target = Config>, P: AsRef<Path>>(
-    config: &C,
-    node: &SiteNode,
-    pool: &cache::Pool,
-    renderer: &Renderer,
-    staging_dir: P,
-    templates_were_modified: bool,
-) {
-    let conn = pool.get().unwrap();
-    // TODO have to do a chunked iteration when we're rendering listing
-    let pages: Vec<Page> = node
-        .page_files
-        .iter()
-        .map(|page_file| {
-            // TODO currently this hardcodes in the cache-busted CSS ... would be nice not to do
-            // that. so we don't have to rerender the HTMLs for CSS changes.
-            tracing::debug!("processing page");
-            if !templates_were_modified {
-                if let Some((page, _rendered)) = cache::restore_cached(&conn, page_file.clone())? {
-                    // TODO try copying, but if that fails, then write the `rendered`
-                    match copy_previously_generated(config, page_file, &staging_dir) {
-                        Ok(_) => {
-                            tracing::debug!(
-                                "copied previously generated file for {:?}",
-                                &page_file.out_path
-                            );
-                            return Ok(page);
-                        }
-                        Err(e) => {
-                            tracing::warn!("error copying previously generated file: {:?}", e);
-                        }
-                    }
-                }
-            }
-
-            tracing::debug!("rendering page: {:?}", page_file.rel_path);
-            let page = parse_page(page_file.clone()).unwrap();
-            let rendered = renderer.render_page(&page, &node.render_rules)?;
-            // TODO really maybe should do the rest of this stuff with tokio async,
-            // so just send whatever is needed through a channel to handle that.
-            cache::cache(&conn, &page, &rendered).unwrap();
-            diskio::write_html(staging_dir.as_ref().join(&page_file.out_path), &rendered)?;
-            Ok(page)
-        })
-        .collect::<anyhow::Result<Vec<Page>>>()
-        .unwrap();
-
-    // TODO listing pages
-    // if node.render_rules.should_render_listing() {
-    //     let markdowns: Vec<Markdown> = pages.iter().filter_map(|page| match page {
-    //         Page::Markdown(m) => Some(m),
-    //         _ => None,
-    //     });
-    //     let rendered = renderer
-    //         .render_listing_page(&pages, &node.render_rules, 0)
-    //         .unwrap();
-    //     let path = dir_path.join(format!("{}", page_index.0));
-    //     diskio::write_html(out_dir, path, &rendered);
-    // }
-}
-
 /// Generate the site.
-pub fn generate() -> anyhow::Result<()> {
-    let pool = cache::new_pool();
+pub async fn generate() -> anyhow::Result<()> {
+    let pool = Arc::new(cache::new_pool());
     let conn = pool.get()?;
     // TODO probably should be one big tx so idk about the pool...
+    // Or maybe copy the whole DB?
     cache::init_cache(&conn).unwrap();
     let config = Arc::new(Config::init().map_or_else(|e| panic!("{}", e), |c| c));
 
@@ -312,7 +250,7 @@ pub fn generate() -> anyhow::Result<()> {
     let site_nodes = diskio::collect_site_nodes(config_clone);
 
     let liquids = get_all_liquids(&config);
-    let templates_were_modified = {
+    let liquids_were_modified = {
         let conn = pool.get().unwrap();
         check_latest_modified_liquid(&conn, &liquids)
     };
@@ -325,20 +263,100 @@ pub fn generate() -> anyhow::Result<()> {
 
     tracing::debug!("collected {} site nodes", site_nodes.len());
 
-    site_nodes.iter().par_bridge().for_each(|site_node| {
-        handle_site_node(
-            &config,
-            site_node,
-            &pool,
-            &renderer,
-            &staging_dir,
-            templates_were_modified,
-        )
+    let (render_tx, render_rx) = channel::<(PageFile, Arc<RenderRules>)>();
+    let (post_render_tx, post_render_rx) = channel::<(Page, String)>();
+
+    let staging_path = Arc::new(staging_dir.path().to_path_buf());
+    {
+        let config = config.clone();
+        let post_render_tx = post_render_tx.clone();
+        let pool = pool.clone();
+        let staging_path = staging_path.clone();
+
+        thread::spawn(move || {
+            let conn = &pool.get().unwrap();
+            site_nodes
+                .iter()
+                .try_for_each(|node| -> Result<(), anyhow::Error> {
+                    node.page_files
+                        .iter()
+                        .try_for_each(|page_file| -> Result<(), anyhow::Error> {
+                            // If `liquids_were_modified`, we know we have to rerender anyway.
+                            if !liquids_were_modified {
+                                if let Some((page, rendered)) =
+                                    cache::restore_cached(conn, page_file.clone())?
+                                {
+                                    // TODO probably should use tokio `copy` and do this with some
+                                    // concurrency?
+                                    match copy_previously_generated(
+                                        &config,
+                                        page_file,
+                                        staging_path.as_path(),
+                                    ) {
+                                        Ok(_) => {
+                                            tracing::debug!(
+                                                "copied previously generated file for {:?}",
+                                                &page_file.out_path
+                                            );
+                                            post_render_tx.send((page, rendered))?;
+                                            return Ok(());
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "error copying previously generated file: {:?}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            render_tx
+                                .send((page_file.clone(), node.render_rules.clone()))
+                                .map_err(|e| anyhow!(e))
+                        })
+                })
+                .unwrap();
+        });
+    }
+
+    thread::spawn(move || {
+        render_rx
+            .into_iter()
+            .par_bridge()
+            .try_for_each(|(page_file, render_rules)| -> Result<(), anyhow::Error> {
+                tracing::debug!("rendering page: {:?}", page_file.rel_path);
+                let page = parse_page(page_file.clone()).unwrap();
+                let rendered = renderer.render_page(&page, &render_rules)?;
+                post_render_tx.send((page, rendered)).unwrap();
+                Ok(())
+            })
+            .unwrap();
     });
+
+    // TODO in fact I think there can be other race conditions, for the other thread.
+    // so maybe need something better than this.
+    let mut join_set = JoinSet::new();
+
+    for (page, rendered) in post_render_rx.iter() {
+        let staging_path = staging_path.clone();
+        let pool = pool.clone();
+        join_set.spawn(async move {
+            tracing::warn!("{}", page.get_link());
+            tracing::debug!("writing rendered page to disk");
+            // TODO really should use async rusqlite for this...
+            let conn = &pool.get().unwrap();
+            cache::cache(conn, &page, &rendered).unwrap();
+            diskio::write_html(staging_path.join(&page.file.out_path), &rendered).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+    }
+
+    while (join_set.join_next().await).is_some() {}
+
     // Replace the old output directory with the new one.
     std::fs::remove_dir_all(config.out_dir()).unwrap();
     std::fs::rename(staging_dir, config.out_dir()).unwrap();
-
     tracing::info!("static site generated!");
+
     Ok(())
 }

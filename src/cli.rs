@@ -58,7 +58,7 @@ async fn main() {
             }
         },
         // TODO propagate the actual error
-        Commands::Gen => generate().expect("Error generating site"),
+        Commands::Gen => generate().await.expect("Error generating site"),
         // TODO devserver should be an optional feature
         Commands::DevServer => run_dev_server().await,
     }

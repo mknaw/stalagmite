@@ -49,8 +49,15 @@ impl PageFile {
         ) {
             let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
             let mut out_path = rel_path.clone();
-            out_path.set_extension("html");
-            tracing::info!("out_path: {:?}", out_path);
+            match out_path.file_stem().unwrap().to_str().unwrap() {
+                "index" => {
+                    out_path.set_extension("html");
+                }
+                stem => {
+                    out_path = out_path.parent().unwrap().join(stem).join("index.html");
+                }
+            };
+
             Ok(Self {
                 abs_path,
                 rel_path,
@@ -104,16 +111,16 @@ impl PageFile {
 }
 
 #[derive(Debug)]
-pub enum Page {
-    Markdown(MarkdownPage),
-    Liquid(PageFile),
-    Html(PageFile),
+pub struct Page {
+    pub file: PageFile,
+    pub data: PageData,
 }
 
 #[derive(Debug)]
-pub struct MarkdownPage {
-    pub file: PageFile,
-    pub markdown: Markdown,
+pub enum PageData {
+    Markdown(Markdown),
+    Liquid,
+    Html,
 }
 
 trait GenericPage {
@@ -122,22 +129,42 @@ trait GenericPage {
 
 impl Page {
     pub fn new_markdown_page(file: PageFile, markdown: Markdown) -> Self {
-        Self::Markdown(MarkdownPage { file, markdown })
+        Self {
+            file,
+            data: PageData::Markdown(markdown),
+        }
+    }
+
+    pub fn new_liquid_page(file: PageFile) -> Self {
+        Self {
+            file,
+            data: PageData::Liquid,
+        }
+    }
+
+    pub fn new_html_page(file: PageFile) -> Self {
+        Self {
+            file,
+            data: PageData::Html,
+        }
     }
 
     // TODO verify that data matches file.file_type?
     pub fn get_url(&self) -> String {
-        match self {
-            Self::Markdown(page) => {
-                format!(
-                    "{:?}/{}",
-                    page.file.rel_dir(),
-                    page.markdown.frontmatter.slug
-                )
+        match &self.data {
+            PageData::Markdown(md) => {
+                format!("{:?}/{}", self.file.rel_dir(), md.frontmatter.slug)
             }
-            Self::Liquid(_) => unimplemented!(),
-            Self::Html(file) => file.rel_path.to_string_lossy().to_string(),
+            PageData::Liquid => unimplemented!(),
+            PageData::Html => self.file.rel_path.to_string_lossy().to_string(),
         }
+    }
+
+    pub fn get_link(&self) -> String {
+        format!(
+            "{}/",
+            self.file.out_path.parent().unwrap().to_str().unwrap()
+        )
     }
 }
 
