@@ -31,6 +31,7 @@ r2d2 = "0.8.10"
 r2d2_sqlite = "0.23.0"
 railwind = "0.1.5"
 rayon = "1.8.0"
+regex = "1.10.3"
 rusqlite = "0.30.0"
 seahash = "4.1.0"
 serde = { version = "1.0.190", features = ["derive"] }

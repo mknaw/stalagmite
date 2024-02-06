@@ -1,29 +1,98 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+use railwind::warning::Position;
+use railwind::ParsedClass;
+use regex::Regex;
 use thiserror::Error;
-
-use crate::utils;
 
 // TODO probably should be using seemingly better `tailwind-rs` instead of `railwind`.
 // that comes with its own problems, like wanting HTML files to parse instead of
 // just regexing the classes from the liquids. but it does other things better.
 
+lazy_static! {
+    // Silly copy-pasta we must do to work around overly restrictive public API of `railwind`.
+    // TODO maybe parsing the HTML like tailwind-rs does is OK at this point?
+    static ref HTML_CLASS_REGEX: Regex =
+        Regex::new(r#"(?:class|className)=(?:["]\W+\s*(?:\w+)\()?["]([^"]+)["]"#).unwrap();
+}
+
 #[derive(Error, Debug)]
 pub enum StyleError {}
 
+#[derive(Debug)]
+pub struct ClassCollector(pub HashSet<String>);
+
+impl ClassCollector {
+    pub fn new() -> Self {
+        Self(HashSet::new())
+    }
+
+    pub fn insert(&mut self, class: String) {
+        self.0.insert(class);
+    }
+}
+
+pub fn collect_classes(html: &str, class_collector: &mut ClassCollector) {
+    for captures in HTML_CLASS_REGEX.captures_iter(html) {
+        let Some(group) = captures.get(1) else {
+            continue;
+        };
+        for cap in group.as_str().split([' ', '\n']) {
+            if !cap.is_empty() && (cap != "group") && (cap != "peer") {
+                class_collector.insert(cap.to_string());
+            }
+        }
+    }
+}
+
+// Copy pasta from `railwind` library. Unfortunately, the library isn't very flexible.
+fn parse_classes(class_collector: &ClassCollector) -> Vec<ParsedClass> {
+    let position = Position::new("", 0, 0);
+    class_collector
+        .0
+        .iter()
+        .filter_map(
+            |raw_str| match ParsedClass::new_from_raw_class(raw_str, position.clone()) {
+                Ok(c) => Some(c),
+                Err(_) => None,
+            },
+        )
+        .collect()
+}
+
+fn generate_strings(parsed_classes: Vec<ParsedClass>) -> Vec<String> {
+    let mut out = Vec::new();
+
+    for class in parsed_classes {
+        if let Ok(class) = class.try_to_string() {
+            out.push(class);
+        }
+    }
+
+    out
+}
+
 /// Generate a name that includes a hash of the contents.
-fn make_cache_busted_name(path: &Path, contents: &[u8]) -> OsString {
+fn make_cache_busted_name(path: &Path, _contents: &[u8]) -> OsString {
     let stem = path.file_stem().unwrap();
     let ext = path.extension().unwrap();
 
+    // TODO temporarily have to not cache-bust for development purposes until I figure out how to
+    // do a "second pass" over liquid templates...
+    // OsString::from(format!(
+    //     "{}.{}.{}",
+    //     stem.to_str().unwrap(),
+    //     utils::hash(contents),
+    //     ext.to_str().unwrap()
+    // ))
     OsString::from(format!(
-        "{}.{}.{}",
+        "{}.{}",
         stem.to_str().unwrap(),
-        utils::hash(contents),
         ext.to_str().unwrap()
     ))
 }
@@ -46,30 +115,14 @@ fn make_cache_busted_name(path: &Path, contents: &[u8]) -> OsString {
 //     take those generated classes and make css file
 // }
 
-/// Use `railwind` to generate our tailwind CSS file.
-pub fn generate_css<P: AsRef<Path>>(
-    input: &[PathBuf],
+pub fn render_css<P: AsRef<Path>>(
+    class_collector: ClassCollector,
     minify: bool,
     out_dir: P,
 ) -> Result<String, StyleError> {
-    let mut warnings = vec![];
-
-    let source_options = input
-        .iter()
-        .map(|i| railwind::SourceOptions {
-            input: i,
-            option: railwind::CollectionOptions::Html,
-        })
-        .collect();
-
-    // TODO all the fancy shit I do with parallelization and limiting disk io is
-    // for naught with this blocking call that iterates and reads all the files anew.
-    let raw = railwind::parse_to_string(
-        railwind::Source::Files(source_options),
-        // TODO should get this from a config option, perhaps?
-        true, // Whether to include tailwind preflight
-        &mut warnings,
-    );
+    let parsed_classes = parse_classes(&class_collector);
+    let styles = generate_strings(parsed_classes);
+    let raw = styles.join("\n");
     let css = if minify {
         let stylesheet = StyleSheet::parse(&raw, ParserOptions::default()).unwrap();
         let printer_options = PrinterOptions {
@@ -93,11 +146,6 @@ pub fn generate_css<P: AsRef<Path>>(
     let out_path = static_dir.join(&filename);
     let mut css_file = File::create(out_path).unwrap();
     css_file.write_all(css).unwrap();
-
-    // TODO want to do something more useful with these warnings?
-    for warning in warnings {
-        tracing::warn!("{}", warning);
-    }
 
     Ok(filename.to_str().unwrap().to_string())
 }

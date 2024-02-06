@@ -8,167 +8,12 @@ use std::{fs, thread};
 use anyhow::anyhow;
 use rayon::prelude::*;
 use tempdir::TempDir;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::core::*;
 use crate::parsers::markdown;
 use crate::{assets, cache, diskio, Config, Renderer};
-
-// TODO this is unseemly, surely I can rewrite this in a nicer manner.
-// struct MarkdownPageInfo {
-//     items: Vec<Markdown>,
-//     dir_path: PathBuf,
-//     page_index: PageIndex,
-// }
-//
-// enum RenderChannelItem {
-//     // TODO try to not clone so much
-//     Html((PageFile, Arc<RenderRules>)),
-//     Liquid((PageFile, Arc<RenderRules>)),
-//     MarkdownSet((MarkdownPageInfo, Arc<RenderRules>)),
-// }
-
-/// TODO maybe this still should be in diskio territory, not sure.
-// fn forward_collected_entries(mut node: SiteNode, render_sink: Sender<RenderChannelItem>) {
-//     // TODO should this also be a sink? need to drop when we're done with this...
-//     let mut markdown_queue: Vec<PageFile> = vec![];
-//
-//     for page_file in node.page_files.drain(0..) {
-//         match page_file.get_page_type() {
-//             PageType::Markdown => {
-//                 markdown_queue.push(page_file);
-//             }
-//             PageType::Liquid => {
-//                 render_sink
-//                     .send(RenderChannelItem::Liquid((
-//                         page_file,
-//                         node.render_rules.clone(),
-//                     )))
-//                     .unwrap();
-//             }
-//             PageType::Html => {
-//                 render_sink
-//                     .send(RenderChannelItem::Html((
-//                         page_file,
-//                         node.render_rules.clone(),
-//                     )))
-//                     .unwrap();
-//             }
-//         }
-//     }
-//
-//     process_markdowns(&node, markdown_queue, render_sink);
-// }
-
-// fn process_markdowns(
-//     node: &SiteNode,
-//     mut markdown_queue: Vec<PageFile>,
-//     render_sink: Sender<RenderChannelItem>,
-// ) {
-//     if markdown_queue.is_empty() {
-//         return;
-//     }
-//
-//     let mut markdown_queue: Vec<(FrontMatter, PageFile, usize)> = markdown_queue
-//         .drain(0..)
-//         .map(|page_file| {
-//             let contents = diskio::read_file_contents(&page_file.abs_path);
-//             // TODO if anything, probably want buffered reading, and not Mmap -> `[..]` slice.
-//             let (frontmatter, offset) = parse_frontmatter(&contents[..]).unwrap();
-//             (frontmatter, page_file, offset)
-//         })
-//         .collect();
-//
-//     // TODO(low priority): support other order bys
-//     markdown_queue.sort_by_key(|item| -item.0.timestamp.timestamp());
-//
-//     let page_size = if let Some(listing_rule_set) = node.render_rules.listing.as_ref() {
-//         listing_rule_set.page_size.unwrap_or(10)
-//     } else {
-//         1
-//     };
-//
-//     // TODO don't really need this if not paginating...
-//     let md_count = markdown_queue.len();
-//
-//     // Round down OK because page numbers are 0-indexed.
-//     // TODO check the math on 1 full page.
-//     // TODO ensure not md_count == 0... would be bad config but whatever
-//     let page_count = (md_count - 1) / page_size;
-//
-//     markdown_queue
-//         .chunks(page_size)
-//         .enumerate()
-//         .for_each(|(page_index, chunk)| {
-//             let pages: Vec<Markdown> = chunk
-//                 .iter()
-//                 .map(|(frontmatter, page_file, offset)| {
-//                     // TODO try to rework to avoid the `.clone()`s here.
-//                     let contents = diskio::read_file_contents(&page_file.abs_path);
-//                     Markdown {
-//                         frontmatter: frontmatter.clone(),
-//                         blocks: parse_blocks(&contents[(*offset)..]),
-//                     }
-//                 })
-//                 .collect();
-//             // TODO ought to be a cleaner way to get this?
-//             let render_info = MarkdownPageInfo {
-//                 items: pages,
-//                 dir_path: node.dir.clone(),
-//                 page_index: (page_index, page_count),
-//             };
-//             render_sink
-//                 .send(RenderChannelItem::MarkdownSet((
-//                     render_info,
-//                     node.render_rules.clone(),
-//                 )))
-//                 .unwrap();
-//         });
-// }
-
-// fn delegate_rendering(renderer: &Renderer, sink: Receiver<RenderChannelItem>, out_dir: &Path) {
-//     sink.into_iter().par_bridge().for_each(|item| match item {
-//         RenderChannelItem::MarkdownSet((info, render_rules)) => {
-//             // This one's the most complicated because it may be necessary to render a listing page.
-//             let MarkdownPageInfo {
-//                 items: pages,
-//                 dir_path,
-//                 page_index,
-//             } = info;
-//
-//             if render_rules.should_render_list() {
-//                 let rendered = renderer
-//                     .render_listing_page(&pages, &render_rules, page_index)
-//                     .unwrap();
-//                 let path = dir_path.join(format!("{}", page_index.0));
-//                 diskio::write_html(out_dir, path, &rendered);
-//             }
-//
-//             pages.into_iter().for_each(|page| {
-//                 let rendered = renderer
-//                     .render_markdown(&page, &render_rules)
-//                     .expect("rendering failed");
-//                 // TODO probably also want to minify + compress
-//                 diskio::write_html(out_dir, dir_path.join(&page.frontmatter.slug), &rendered);
-//             });
-//         }
-//         // TODO should use these `render_rules`
-//         RenderChannelItem::Liquid((page_file, _render_rules)) => {
-//             let rendered = renderer
-//                 .render(&page_file.abs_path)
-//                 .expect("rendering failed");
-//             diskio::write_html(out_dir, &page_file.rel_path, &rendered);
-//         }
-//         RenderChannelItem::Html((file_entry, render_rules)) => {
-//             let html = fs::read_to_string(&file_entry.abs_path).unwrap();
-//             let rendered = renderer
-//                 .render_html(&html, &render_rules)
-//                 .unwrap_or_else(|_| panic!("rendering failed: {:?}", &file_entry.abs_path));
-//             // TODO only `rel_dir()` for `index.html`?
-//             diskio::write_html(out_dir, file_entry.rel_dir(), &rendered);
-//         }
-//     });
-// }
 
 fn get_latest_modified(paths: &[PathBuf]) -> u64 {
     paths
@@ -225,7 +70,6 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     let previous_path = config.out_dir().join(&page_file.out_path);
     if previous_path.metadata()?.is_file() {
         let current_path = staging_dir.as_ref().join(&page_file.out_path);
-        tracing::warn!("out_path {:?}", page_file.out_path);
         fs::create_dir_all(current_path.parent().unwrap())?;
         fs::copy(&previous_path, current_path)?;
         Ok(())
@@ -258,8 +102,7 @@ pub async fn generate() -> anyhow::Result<()> {
     let staging_dir = TempDir::new("stalagmite_staging").unwrap();
 
     // TODO incremental css parsing, queued after template rendering.
-    let tailwind_filename = assets::generate_css(&liquids, true, &staging_dir).unwrap();
-    let renderer = Renderer::new(&config, tailwind_filename, &liquids);
+    let renderer = Renderer::new(&config, "tw.css".to_string(), &liquids);
 
     tracing::debug!("collected {} site nodes", site_nodes.len());
 
@@ -337,12 +180,24 @@ pub async fn generate() -> anyhow::Result<()> {
     // so maybe need something better than this.
     let mut join_set = JoinSet::new();
 
+    let class_collector = Arc::new(Mutex::new(assets::ClassCollector::new()));
+
     for (page, rendered) in post_render_rx.iter() {
         let staging_path = staging_path.clone();
         let pool = pool.clone();
+        let class_collector = class_collector.clone();
+        // TODO probably not even worth doing async... probably better to just thread it...
         join_set.spawn(async move {
-            tracing::warn!("{}", page.get_link());
             tracing::debug!("writing rendered page to disk");
+            // TODO in fact these could all have intra-task concurrency...
+            {
+                // TODO ends up being quite a bit of duplicate work here, since the overwhelming
+                // majority of templates in a real context will repeat the same classes ...
+                // Would be much better to just regex for all the tailwind terms in htmls + liquids...
+                // Even the actual JS tailwind doesn't really tolerate conditional, concatenated classes
+                let mut class_collector = class_collector.lock().await;
+                assets::collect_classes(&rendered, &mut class_collector);
+            }
             // TODO really should use async rusqlite for this...
             let conn = &pool.get().unwrap();
             cache::cache(conn, &page, &rendered).unwrap();
@@ -352,6 +207,9 @@ pub async fn generate() -> anyhow::Result<()> {
     }
 
     while (join_set.join_next().await).is_some() {}
+
+    let class_collector = Arc::try_unwrap(class_collector).unwrap().into_inner();
+    assets::render_css(class_collector, true, &staging_dir).unwrap();
 
     // Replace the old output directory with the new one.
     std::fs::remove_dir_all(config.out_dir()).unwrap();
