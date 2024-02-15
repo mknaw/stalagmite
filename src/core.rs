@@ -35,11 +35,14 @@ pub struct PageFile {
     // Desired output path, relative to the output directory.
     pub out_path: PathBuf,
     // Cached file contents.
+    // TODO this might not be so good...
+    // we might be keeping the contents in memory for a long time.
     pub contents: OnceLock<String>,
     // Cached content hash.
     pub hash: OnceLock<String>,
 }
 
+// TODO ought to call this something else now... since it's not just for Pages, per se.
 impl PageFile {
     pub fn try_new<P: AsRef<Path>>(pages_dir: P, path: P) -> anyhow::Result<Self> {
         let abs_path = path.as_ref().to_path_buf();

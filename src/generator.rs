@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -8,17 +8,16 @@ use std::{fs, thread};
 use anyhow::anyhow;
 use rayon::prelude::*;
 use tempdir::TempDir;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::core::*;
 use crate::parsers::markdown;
 use crate::{assets, cache, diskio, Config, Renderer};
 
-fn get_latest_modified(paths: &[PathBuf]) -> u64 {
-    paths
+fn get_latest_modified(page_files: &[PageFile]) -> u64 {
+    page_files
         .iter()
-        .map(|p| p.metadata().unwrap().modified().unwrap())
+        .map(|p| p.abs_path.metadata().unwrap().modified().unwrap())
         .max()
         .unwrap() // Assume there must be _some_ templates
         // TODO could probably assert that earlier though
@@ -27,8 +26,8 @@ fn get_latest_modified(paths: &[PathBuf]) -> u64 {
         .as_secs()
 }
 
-fn check_latest_modified_liquid(conn: &rusqlite::Connection, paths: &[PathBuf]) -> bool {
-    let files_ts = get_latest_modified(paths);
+fn check_latest_modified_liquid(conn: &rusqlite::Connection, liquids: &[PageFile]) -> bool {
+    let files_ts = get_latest_modified(liquids);
     if let Some(cache_ts) = cache::get_latest_template_modified(conn).unwrap() {
         // TODO really have to roll this back if we blow up later in the generation...
         tracing::debug!("files_ts: {}, cache_ts: {}", files_ts, cache_ts);
@@ -44,10 +43,12 @@ fn check_latest_modified_liquid(conn: &rusqlite::Connection, paths: &[PathBuf]) 
     }
 }
 
-fn get_all_liquids(config: &Config) -> Vec<PathBuf> {
-    diskio::walk(&config.layouts_dir(), "liquid")
-        .chain(diskio::walk(&config.blocks_dir(), "liquid"))
-        .collect()
+fn collect_liquids(config: &Config) -> Vec<PageFile> {
+    let layouts = diskio::walk(&config.layouts_dir(), "liquid")
+        .map(|path| PageFile::try_new(&config.layouts_dir(), &path).unwrap());
+    let blocks = diskio::walk(&config.blocks_dir(), "liquid")
+        .map(|path| PageFile::try_new(&config.blocks_dir(), &path).unwrap());
+    layouts.chain(blocks).collect()
 }
 
 fn parse_page(page_file: PageFile) -> anyhow::Result<Page> {
@@ -93,15 +94,33 @@ pub async fn generate() -> anyhow::Result<()> {
     let config_clone = config.clone();
     let site_nodes = diskio::collect_site_nodes(config_clone);
 
-    let liquids = get_all_liquids(&config);
-    let liquids_were_modified = {
-        let conn = pool.get().unwrap();
-        check_latest_modified_liquid(&conn, &liquids)
-    };
-
     let staging_dir = TempDir::new("stalagmite_staging").unwrap();
 
-    // TODO incremental css parsing, queued after template rendering.
+    let liquids = collect_liquids(&config);
+
+    {
+        // TODO, maybe - technically can do this in other thread...
+        // TODO more importantly - pointless to read all these files when the renderer initialization
+        // will read them!
+        let mut class_collector = assets::ClassCollector::new();
+        liquids.iter().for_each(|pf| {
+            assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
+        });
+
+        site_nodes
+            .iter()
+            .flat_map(|node| {
+                node.page_files
+                    .iter()
+                    .filter(|pf| matches!(pf.get_page_type(), PageType::Html))
+            })
+            .for_each(|pf| {
+                assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
+            });
+
+        assets::render_css(class_collector, true, &staging_dir).unwrap();
+    }
+
     let renderer = Renderer::new(&config, "tw.css".to_string(), &liquids);
 
     tracing::debug!("collected {} site nodes", site_nodes.len());
@@ -118,6 +137,7 @@ pub async fn generate() -> anyhow::Result<()> {
 
         thread::spawn(move || {
             let conn = &pool.get().unwrap();
+            let liquids_were_modified = check_latest_modified_liquid(conn, &liquids);
             site_nodes
                 .iter()
                 .try_for_each(|node| -> Result<(), anyhow::Error> {
@@ -180,24 +200,12 @@ pub async fn generate() -> anyhow::Result<()> {
     // so maybe need something better than this.
     let mut join_set = JoinSet::new();
 
-    let class_collector = Arc::new(Mutex::new(assets::ClassCollector::new()));
-
     for (page, rendered) in post_render_rx.iter() {
         let staging_path = staging_path.clone();
         let pool = pool.clone();
-        let class_collector = class_collector.clone();
         // TODO probably not even worth doing async... probably better to just thread it...
         join_set.spawn(async move {
             tracing::debug!("writing rendered page to disk");
-            // TODO in fact these could all have intra-task concurrency...
-            {
-                // TODO ends up being quite a bit of duplicate work here, since the overwhelming
-                // majority of templates in a real context will repeat the same classes ...
-                // Would be much better to just regex for all the tailwind terms in htmls + liquids...
-                // Even the actual JS tailwind doesn't really tolerate conditional, concatenated classes
-                let mut class_collector = class_collector.lock().await;
-                assets::collect_classes(&rendered, &mut class_collector);
-            }
             // TODO really should use async rusqlite for this...
             let conn = &pool.get().unwrap();
             cache::cache(conn, &page, &rendered).unwrap();
@@ -207,9 +215,6 @@ pub async fn generate() -> anyhow::Result<()> {
     }
 
     while (join_set.join_next().await).is_some() {}
-
-    let class_collector = Arc::try_unwrap(class_collector).unwrap().into_inner();
-    assets::render_css(class_collector, true, &staging_dir).unwrap();
 
     // Replace the old output directory with the new one.
     std::fs::remove_dir_all(config.out_dir()).unwrap();

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::prelude::*;
 use liquid::partials::{EagerCompiler, InMemorySource};
@@ -126,12 +126,14 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(config: &Config, css_file_name: String, partials: &[PathBuf]) -> Self {
+    pub fn new(config: &Config, css_file_name: String, partials: &[PageFile]) -> Self {
         let partials = partials
             .iter()
-            .fold(Partials::empty(), |mut partials, path| {
-                let layout = fs::read_to_string(path).unwrap();
-                partials.add(make_partial_key(path, &config.project_dir), layout);
+            .fold(Partials::empty(), |mut partials, page_file| {
+                partials.add(
+                    make_partial_key(&page_file.abs_dir(), &config.project_dir),
+                    page_file.get_contents().unwrap(),
+                );
                 partials
             });
 
