@@ -89,7 +89,7 @@ fn render_block(
         .join("");
 
     let partial_name = find_partial_name(block_rules, &kind)?;
-    let partial = runtime.partials().get(&partial_name).unwrap();
+    let partial = runtime.partials().get(&partial_name)?;
     let pass_through = liquid::object!({
         "content": content,
     });

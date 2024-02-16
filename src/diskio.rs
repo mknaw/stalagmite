@@ -4,7 +4,7 @@ use std::sync::Arc;
 use ignore::Walk;
 use memmap2::Mmap;
 
-use crate::core::{PageFile, RenderRules, SiteNode, DEFAULT_RENDER_RULE_SET};
+use crate::core::{RenderRules, SiteEntry, SiteNode, DEFAULT_RENDER_RULE_SET};
 use crate::Config;
 
 /// Read a `path` to an `Mmap`.
@@ -50,16 +50,16 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
             let paths: Vec<PathBuf> = dir_entries
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .collect();
-            let page_files: Vec<PageFile> = paths
+            let site_entries: Vec<SiteEntry> = paths
                 .iter()
-                .filter_map(|path| PageFile::try_new(pages_dir, path).ok())
+                .filter_map(|path| SiteEntry::try_new(pages_dir, path).ok())
                 .collect();
 
-            if !page_files.is_empty() {
+            if !site_entries.is_empty() {
                 site_nodes.push(SiteNode {
                     dir: current_path.strip_prefix(pages_dir).unwrap().to_path_buf(),
                     render_rules: rules_stack.last().expect("rules_stack is empty").clone(),
-                    page_files,
+                    site_entries,
                 });
             }
 
@@ -88,5 +88,13 @@ pub async fn write_html<P: AsRef<Path>>(out_path: P, html: &str) -> anyhow::Resu
     tracing::debug!("Writing HTML to {}", out_path.as_ref().display());
     tokio::fs::create_dir_all(out_path.as_ref().parent().unwrap()).await?;
     tokio::fs::write(&out_path, html).await?;
+    Ok(())
+}
+
+// TODO what color is my function?
+pub fn write_html_sync<P: AsRef<Path>>(out_path: P, html: &str) -> anyhow::Result<()> {
+    tracing::debug!("Writing HTML to {}", out_path.as_ref().display());
+    std::fs::create_dir_all(out_path.as_ref().parent().unwrap())?;
+    std::fs::write(&out_path, html)?;
     Ok(())
 }

@@ -2,7 +2,7 @@ pub fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()
         .filter_map(|c| match c {
-            ' ' => Some('-'),
+            ' ' | '_' => Some('-'),
             c if c.is_ascii_alphanumeric() => Some(c),
             _ => None,
         })

@@ -9,7 +9,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::{Block, Page, PageData, PageFile, PageIndex, RenderRules, Token};
+use crate::core::{Block, Page, PageData, PageIndex, RenderRules, SiteEntry, Token};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -26,6 +26,7 @@ pub enum RenderError {
 
 type RenderResult<T> = Result<T, RenderError>;
 
+// TODO this is pretty silly, just want the rel path, don't need a fancy fn for it.
 fn make_partial_key(partial_path: &Path, current_dir: &Path) -> String {
     partial_path
         .strip_prefix(current_dir)
@@ -103,17 +104,14 @@ struct ListingEntry {
     pub blocks: Vec<Block>,
 }
 
-impl From<&Page> for ListingEntry {
-    fn from(page: &Page) -> Self {
-        match &page.data {
-            PageData::Markdown(md) => Self {
-                title: md.frontmatter.title.clone(),
-                timestamp: md.frontmatter.timestamp,
-                slug: md.frontmatter.slug.clone(),
-                link: page.get_link(),
-                blocks: md.blocks.clone(),
-            },
-            _ => unimplemented!(),
+impl From<&Markdown> for ListingEntry {
+    fn from(markdown: &Markdown) -> Self {
+        Self {
+            title: markdown.frontmatter.title.clone(),
+            timestamp: markdown.frontmatter.timestamp,
+            slug: markdown.frontmatter.slug.clone(),
+            link: "".to_owned(), // TODO !!!
+            blocks: markdown.blocks.clone(),
         }
     }
 }
@@ -126,13 +124,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(config: &Config, css_file_name: String, partials: &[PageFile]) -> Self {
+    pub fn new(config: &Config, css_file_name: String, partials: &[SiteEntry]) -> Self {
         let partials = partials
             .iter()
-            .fold(Partials::empty(), |mut partials, page_file| {
+            .fold(Partials::empty(), |mut partials, site_entry| {
                 partials.add(
-                    make_partial_key(&page_file.abs_dir(), &config.project_dir),
-                    page_file.get_contents().unwrap(),
+                    make_partial_key(&site_entry.abs_path, &config.project_dir),
+                    site_entry.get_contents().unwrap(),
                 );
                 partials
             });
@@ -180,7 +178,7 @@ impl Renderer {
 
     pub fn render_listing_page<R: Deref<Target = RenderRules>>(
         &self,
-        pages: &[Page],
+        markdowns: &[Markdown],
         render_rules: &R,
         page_index: PageIndex,
     ) -> RenderResult<String> {
@@ -194,7 +192,7 @@ impl Renderer {
         // TODO should settle on either calling `layout` or `template`? Maybe?
         let layouts = &render_rules.listing.as_ref().unwrap().layouts;
         let template = self.get_template(&layouts[0]);
-        let entries: Vec<ListingEntry> = pages.iter().map(|page| page.into()).collect();
+        let entries: Vec<ListingEntry> = markdowns.iter().map(|markdown| markdown.into()).collect();
         let prev_page_link = if page_index.0 == 0 {
             None
         } else {
@@ -222,13 +220,13 @@ impl Renderer {
     // probably here is where one uses a `Deref to RenderRuleSet` kind of pattern.
     fn render_markdown<R: Deref<Target = RenderRules>>(
         &self,
-        page_file: &PageFile,
+        site_entry: &SiteEntry,
         markdown: &Markdown,
         render_rules: &R,
     ) -> RenderResult<String> {
         tracing::debug!(
             "rendering {:?}/{}",
-            page_file.rel_dir(),
+            site_entry.rel_dir(),
             markdown.frontmatter.slug
         );
         let layout_stack = &render_rules.layouts[..];
