@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use camino::Utf8PathBuf;
 use stalagmite::diskio::walk;
 use stalagmite::{generate, Config};
 
 #[tokio::test]
 async fn generate_example_site() {
-    let example_project_dir = std::env::current_dir().unwrap().join("example");
+    let example_project_dir =
+        Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap().join("example")).unwrap();
 
     std::fs::remove_dir_all(example_project_dir.join("public")).ok();
     std::fs::remove_file(example_project_dir.join("db.sqlite")).ok();
@@ -15,17 +17,16 @@ async fn generate_example_site() {
     generate(config).await.unwrap();
 
     let out_dir = example_project_dir.join("public");
-    let files = walk(&out_dir, "html").collect::<Vec<_>>();
-    // TODO kind of a fragile and tedious comparison, better to stringify + sort them.
+    let mut files: Vec<Utf8PathBuf> = walk(&out_dir, "html")
+        .map(|p| p.strip_prefix(&out_dir).unwrap().to_owned())
+        .collect();
+    files.sort();
     assert_eq!(
         files,
         vec![
-            out_dir.join("index.html"),
-            out_dir
-                .join("blog")
-                .join("welcome-to-my-blog")
-                .join("index.html"),
-            out_dir.join("blog").join("0").join("index.html"),
+            "blog/0/index.html",
+            "blog/welcome-to-my-blog/index.html",
+            "index.html",
         ]
     );
 

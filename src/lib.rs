@@ -22,14 +22,13 @@ pub(crate) mod liquid {
 }
 pub(crate) mod assets;
 pub(crate) mod cache;
-pub(crate) mod core;
+pub(crate) mod common;
 pub(crate) mod parsers;
 pub mod project;
 mod renderer;
 mod utils;
 
-pub use core::Markdown;
-
+pub use common::Markdown;
 pub use config::Config;
 pub use devserver::run as run_dev_server;
 pub use generator::generate;

@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
-use std::path::Path;
 
+use camino::Utf8Path;
 use chrono::prelude::*;
 use liquid::partials::{EagerCompiler, InMemorySource};
 use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::{Block, BlockRules, Page, PageData, PageIndex, RenderRules, SiteEntry};
+use crate::common::{Block, BlockRules, Page, PageData, PageIndex, RenderRules, SiteEntry};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -27,17 +27,16 @@ pub enum RenderError {
 type RenderResult<T> = Result<T, RenderError>;
 
 // TODO this is pretty silly, just want the rel path, don't need a fancy fn for it.
-fn make_partial_key(partial_path: &Path, current_dir: &Path) -> String {
+fn make_partial_key(partial_path: &Utf8Path, current_dir: &Utf8Path) -> String {
     partial_path
         .strip_prefix(current_dir)
         .unwrap()
-        .to_str()
-        .unwrap()
+        .as_str()
         .to_owned()
 }
 
 /// Helper fn for collecting layouts from a directory.
-fn collect_template_map(parser: &Parser, dir: &Path) -> HashMap<String, Template> {
+fn collect_template_map(parser: &Parser, dir: &Utf8Path) -> HashMap<String, Template> {
     // TODO stuff like this should be parallelizable..
     HashMap::from_iter(diskio::walk(dir, "liquid").map(|path| {
         let key = make_template_key(path.strip_prefix(dir).unwrap());
@@ -47,10 +46,10 @@ fn collect_template_map(parser: &Parser, dir: &Path) -> HashMap<String, Template
     }))
 }
 
-fn make_template_key(path: &Path) -> String {
+fn make_template_key(path: &Utf8Path) -> String {
     // TODO should check for non `layout` duplicates rather than permitting
-    match path.file_stem().unwrap().to_str().unwrap() {
-        "layout" => path.to_string_lossy().to_string(),
+    match path.file_stem().unwrap() {
+        "layout" => path.to_string(),
         name => name.to_string(),
     }
 }

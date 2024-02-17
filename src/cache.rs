@@ -1,7 +1,7 @@
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::*;
 
-use crate::core::*;
+use crate::common::*;
 
 const DB_PATH: &str = "./db.sqlite";
 

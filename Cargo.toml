@@ -15,6 +15,7 @@ path = "src/cli.rs"
 [dependencies]
 anyhow = "1.0.79"
 axum = { version = "0.6.20", features = ["macros"] }
+camino = "1.1.6"
 chrono = { version = "0.4.31", features = ["serde"] }
 clap = { version = "4.4.6", features = ["derive"] }
 ignore = "0.4.20"

@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use ignore::Walk;
 use memmap2::Mmap;
 
-use crate::core::{RenderRules, SiteEntry, SiteNode, DEFAULT_RENDER_RULE_SET};
+use crate::common::{RenderRules, SiteEntry, SiteNode, DEFAULT_RENDER_RULE_SET};
 use crate::Config;
 
 /// Read a `path` to an `Mmap`.
@@ -14,11 +15,14 @@ pub fn read_file_contents<P: AsRef<Path>>(path: P) -> Mmap {
 }
 
 /// Recursively iterate over all files in the given directory with the given extension.
-pub fn walk<'a, P: AsRef<Path>>(dir: P, ext: &'a str) -> Box<dyn Iterator<Item = PathBuf> + 'a> {
+pub fn walk<'a, P: AsRef<Path>>(
+    dir: P,
+    ext: &'a str,
+) -> Box<dyn Iterator<Item = Utf8PathBuf> + 'a> {
     let walk = Walk::new(dir).flatten().filter_map(|entry| {
         let path = entry.path();
         if path.is_file() && path.extension() == Some(ext.as_ref()) {
-            Some(path.to_owned())
+            Some(Utf8PathBuf::from_path_buf(path.to_owned()).unwrap())
         } else {
             None
         }
@@ -33,8 +37,8 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
     // output a `SiteNode` for each of those.
     fn recurse(
         site_nodes: &mut Vec<SiteNode>,
-        pages_dir: &Path,
-        current_path: &Path,
+        pages_dir: &Utf8Path,
+        current_path: &Utf8Path,
         rules_stack: &mut Vec<Arc<RenderRules>>,
     ) {
         let rules_path = current_path.join("rules.yaml");
@@ -47,12 +51,16 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
         }
 
         if let Ok(dir_entries) = std::fs::read_dir(current_path) {
-            let paths: Vec<PathBuf> = dir_entries
-                .filter_map(|entry| entry.ok().map(|e| e.path()))
+            let paths: Vec<Utf8PathBuf> = dir_entries
+                .filter_map(|entry| {
+                    entry
+                        .ok()
+                        .map(|e| Utf8PathBuf::from_path_buf(e.path()).unwrap())
+                })
                 .collect();
             let site_entries: Vec<SiteEntry> = paths
                 .iter()
-                .filter_map(|path| SiteEntry::try_new(pages_dir, path).ok())
+                .filter_map(|path| SiteEntry::try_new(pages_dir, path.clone()).ok())
                 .collect();
 
             if !site_entries.is_empty() {

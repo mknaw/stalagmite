@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +28,11 @@ pub enum PageType {
 pub struct SiteEntry {
     // TODO not sure I really want the rel_path, abs_path thing...
     // Absolute path of the file.
-    pub abs_path: PathBuf,
+    pub abs_path: Utf8PathBuf,
     // Path relative to the pages directory.
-    pub rel_path: PathBuf,
+    pub rel_path: Utf8PathBuf,
     // Desired output path, relative to the output directory.
-    pub out_path: PathBuf,
+    pub out_path: Utf8PathBuf,
     // Relative url path.
     pub url_path: String,
     // Cached file contents.
@@ -45,10 +45,9 @@ pub struct SiteEntry {
 
 // TODO ought to call this something else now... since it's not just for Pages, per se.
 impl SiteEntry {
-    pub fn try_new<P: AsRef<Path>>(pages_dir: P, path: P) -> anyhow::Result<Self> {
-        let abs_path = path.as_ref().to_path_buf();
+    pub fn try_new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
         if matches!(
-            abs_path.extension().and_then(|ext| ext.to_str()),
+            abs_path.extension(),
             Some("md") | Some("liquid") | Some("html")
         ) {
             let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
@@ -58,9 +57,9 @@ impl SiteEntry {
                 .map(|c| slugify(c.as_os_str().to_str().unwrap()))
                 .collect::<Vec<_>>()
                 .join("/")
-                .parse::<PathBuf>()?;
+                .parse::<Utf8PathBuf>()?;
 
-            match out_path.file_stem().unwrap().to_str().unwrap() {
+            match out_path.file_stem().unwrap() {
                 "index" => {
                     out_path.set_extension("html");
                 }
@@ -69,7 +68,7 @@ impl SiteEntry {
                 }
             };
 
-            let url_path = format!("{}/", out_path.parent().unwrap().to_str().unwrap());
+            let url_path = format!("{}/", out_path.parent().unwrap());
 
             Ok(Self {
                 abs_path,
@@ -86,7 +85,7 @@ impl SiteEntry {
 
     /// Returns the type of the file.
     pub fn get_page_type(&self) -> PageType {
-        match self.rel_path.extension().and_then(|ext| ext.to_str()) {
+        match self.rel_path.extension() {
             Some("md") => PageType::Markdown,
             Some("liquid") => PageType::Liquid,
             Some("html") => PageType::Html,
@@ -95,12 +94,12 @@ impl SiteEntry {
     }
 
     /// Returns the absolute path of the directory containing the file.
-    pub fn abs_dir(&self) -> PathBuf {
+    pub fn abs_dir(&self) -> Utf8PathBuf {
         self.abs_path.parent().unwrap().to_owned()
     }
 
     /// Returns the relative path of the directory containing the file.
-    pub fn rel_dir(&self) -> PathBuf {
+    pub fn rel_dir(&self) -> Utf8PathBuf {
         self.rel_path.parent().unwrap().to_owned()
     }
 
@@ -186,15 +185,12 @@ impl Page {
                 format!("{:?}/{}", self.file.rel_dir(), md.frontmatter.slug)
             }
             PageData::Liquid => unimplemented!(),
-            PageData::Html => self.file.rel_path.to_string_lossy().to_string(),
+            PageData::Html => self.file.rel_path.as_str().to_owned(),
         }
     }
 
     pub fn get_link(&self) -> String {
-        format!(
-            "{}/",
-            self.file.out_path.parent().unwrap().to_str().unwrap()
-        )
+        format!("{}/", self.file.out_path.parent().unwrap().to_owned(),)
     }
 }
 
@@ -206,7 +202,7 @@ impl Page {
 #[derive(Debug)]
 pub struct SiteNode {
     // TODO still needed? Feels like one could get away with just the info on `FileEntry`.
-    pub dir: PathBuf,
+    pub dir: Utf8PathBuf,
     pub render_rules: Arc<RenderRules>,
     pub site_entries: Vec<SiteEntry>,
 }

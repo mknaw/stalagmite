@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use tempdir::TempDir;
 use tokio::task::JoinSet;
 
-use crate::core::*;
+use crate::common::*;
 use crate::parsers::markdown;
 use crate::{assets, cache, diskio, Config, Renderer};
 
@@ -47,9 +47,9 @@ fn check_latest_modified_liquid(conn: &rusqlite::Connection, liquids: &[SiteEntr
 // Really could have a `StaticAsset` type.
 fn collect_liquids(config: &Config) -> Vec<SiteEntry> {
     let layouts = diskio::walk(&config.layouts_dir(), "liquid")
-        .map(|path| SiteEntry::try_new(&config.layouts_dir(), &path).unwrap());
+        .map(|path| SiteEntry::try_new(&config.layouts_dir(), path).unwrap());
     let blocks = diskio::walk(&config.blocks_dir(), "liquid")
-        .map(|path| SiteEntry::try_new(&config.blocks_dir(), &path).unwrap());
+        .map(|path| SiteEntry::try_new(&config.blocks_dir(), path).unwrap());
     layouts.chain(blocks).collect()
 }
 

@@ -9,7 +9,7 @@ use nom::sequence::delimited;
 use nom::IResult;
 use thiserror::Error;
 
-use crate::core::{Block, FrontMatter, Token};
+use crate::common::{Block, FrontMatter, Token};
 use crate::Markdown;
 
 type MarkdownResult<T> = Result<T, MarkdownError>;
