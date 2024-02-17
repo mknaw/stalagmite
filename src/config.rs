@@ -46,4 +46,8 @@ impl Config {
     pub fn out_dir(&self) -> Utf8PathBuf {
         self.project_dir.join("public")
     }
+
+    pub fn assets_dir(&self) -> Utf8PathBuf {
+        self.project_dir.join("assets")
+    }
 }

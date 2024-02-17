@@ -8,46 +8,45 @@ const DB_PATH: &str = "./db.sqlite";
 type ConnectionManager = SqliteConnectionManager;
 pub type Pool = r2d2::Pool<ConnectionManager>;
 
-pub fn new_pool() -> Pool {
+mod embedded {
+    use refinery::embed_migrations;
+    embed_migrations!("./migrations");
+}
+
+fn new_pool() -> Pool {
     let manager = SqliteConnectionManager::file(DB_PATH);
     r2d2::Pool::new(manager).unwrap()
 }
 
-// TODO use migrations
-pub fn init_cache(conn: &Connection) -> anyhow::Result<()> {
-    // TODO don't actually _need_ parent_url, can define a custom function to get it from url.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS markdowns (
-            id          INTEGER PRIMARY KEY,
-            url         TEXT NOT NULL UNIQUE,
-            parent_url  TEXT NOT NULL,
-            hash        TEXT NOT NULL,
-            timestamp   INTEGER NOT NULL,
-            frontmatter BLOB NOT NULL,
-            blocks      TEXT NOT NULL,
-            rendered    BLOB NOT NULL
-        )",
-        // content ? for text search.
-        (),
-    )?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS pages (
-            id       INTEGER PRIMARY KEY,
-            url      TEXT NOT NULL UNIQUE,
-            hash     TEXT NOT NULL,
-            rendered BLOB NOT NULL
-        )",
-        // content ? for text search.
-        (),
-    )?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS partial_checkpoint (
-            id      INTEGER PRIMARY KEY,
-            touched INTEGER NOT NULL
-        )",
-        (),
-    )?;
-    Ok(())
+pub fn bootstrap() -> anyhow::Result<Pool> {
+    let pool = new_pool();
+    let mut conn = pool.get()?;
+    embedded::migrations::runner().run(&mut *conn)?;
+    Ok(pool)
+}
+
+// TODO also would be good to purge the old ones.
+pub fn check_asset_changed(conn: &Connection, filename: &str, hash: &str) -> anyhow::Result<bool> {
+    let previous: Option<String> = conn
+        .query_row(
+            "SELECT hash FROM assets WHERE filename = (?)",
+            [filename],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let changed = previous.map_or(true, |previous| previous != hash);
+    if changed {
+        conn.execute(
+            "INSERT INTO assets (filename, hash) VALUES (?, ?)
+             ON CONFLICT(filename) DO
+                 UPDATE
+                 SET
+                    hash = excluded.hash
+            ",
+            [filename, hash],
+        )?;
+    }
+    Ok(changed)
 }
 
 pub fn get_latest_template_modified(conn: &Connection) -> Result<Option<u64>> {

@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use tempdir::TempDir;
 use tokio::task::JoinSet;
 
+use crate::cache::Pool;
 use crate::common::*;
 use crate::parsers::markdown;
 use crate::utils::divide_round_up;
@@ -27,7 +28,7 @@ fn get_latest_modified(site_entries: &[SiteEntry]) -> u64 {
         .as_secs()
 }
 
-fn check_latest_modified_liquid(conn: &rusqlite::Connection, liquids: &[SiteEntry]) -> bool {
+fn check_latest_modified_template(conn: &rusqlite::Connection, liquids: &[SiteEntry]) -> bool {
     let files_ts = get_latest_modified(liquids);
     if let Some(cache_ts) = cache::get_latest_template_modified(conn).unwrap() {
         // TODO really have to roll this back if we blow up later in the generation...
@@ -46,10 +47,10 @@ fn check_latest_modified_liquid(conn: &rusqlite::Connection, liquids: &[SiteEntr
 
 // TODO these don't actually need to be `SiteEntry`s... I just wanted to reuse `get_contents`.
 // Really could have a `StaticAsset` type.
-fn collect_liquids(config: &Config) -> Vec<SiteEntry> {
-    let layouts = diskio::walk(&config.layouts_dir(), "liquid")
+fn collect_templates(config: &Config) -> Vec<SiteEntry> {
+    let layouts = diskio::walk(&config.layouts_dir(), &Some("liquid"))
         .map(|path| SiteEntry::try_new(&config.layouts_dir(), path).unwrap());
-    let blocks = diskio::walk(&config.blocks_dir(), "liquid")
+    let blocks = diskio::walk(&config.blocks_dir(), &Some("liquid"))
         .map(|path| SiteEntry::try_new(&config.blocks_dir(), path).unwrap());
     layouts.chain(blocks).collect()
 }
@@ -130,22 +131,20 @@ fn generate_listing<P: AsRef<Path>, R: Deref<Target = RenderRules>>(
 }
 
 /// Generate the site.
-pub async fn generate(config: Arc<Config>) -> anyhow::Result<()> {
-    let pool = Arc::new(cache::new_pool());
-    let conn = pool.get()?;
+pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()> {
     // TODO probably should be one big tx so idk about the pool...
     // Or maybe copy the whole DB?
-    cache::init_cache(&conn).unwrap();
+    let conn = pool.get()?;
 
     let site_nodes = diskio::collect_site_nodes(config.clone());
 
     let staging_dir = TempDir::new("stalagmite_staging").unwrap();
 
-    let liquids = collect_liquids(&config);
+    let templates = collect_templates(&config);
 
     {
         let mut class_collector = assets::ClassCollector::new();
-        liquids.iter().for_each(|pf| {
+        templates.iter().for_each(|pf| {
             assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
         });
 
@@ -163,7 +162,15 @@ pub async fn generate(config: Arc<Config>) -> anyhow::Result<()> {
         assets::render_css(class_collector, true, &staging_dir).unwrap();
     }
 
-    let renderer = Arc::new(Renderer::new(&config, "tw.css".to_string(), &liquids));
+    let (asset_map, assets_have_changed) =
+        assets::collect(&config, staging_dir.path(), &conn).unwrap();
+
+    let renderer = Arc::new(Renderer::new(
+        &config,
+        asset_map,
+        "tw.css".to_string(),
+        &templates,
+    ));
 
     tracing::debug!("collected {} site nodes", site_nodes.len());
 
@@ -181,14 +188,20 @@ pub async fn generate(config: Arc<Config>) -> anyhow::Result<()> {
 
         thread::spawn(move || {
             let conn = &pool.get().unwrap();
-            let liquids_were_modified = check_latest_modified_liquid(conn, &liquids);
+            // Force rendering anew if templates have changed or the underlying assets.
+            // TODO Could do this quite a bit smartly:
+            // - for the assets, just leave the non cache-busted name for a second pass
+            // - the templates would be a bit trickier, but should be able to determine which
+            //   template needed for which render, and skip there.
+            let force_render =
+                assets_have_changed || check_latest_modified_template(conn, &templates);
             site_nodes
                 .into_iter()
                 .try_for_each(|node| -> Result<(), anyhow::Error> {
                     let result = node.site_entries.iter().try_for_each(
                         |site_entry| -> Result<(), anyhow::Error> {
                             // If `liquids_were_modified`, we know we have to rerender anyway.
-                            if !liquids_were_modified {
+                            if !force_render {
                                 if let Some((page, rendered)) =
                                     cache::restore_cached(conn, site_entry.clone())?
                                 {

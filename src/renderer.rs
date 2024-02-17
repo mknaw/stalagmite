@@ -13,6 +13,7 @@ use crate::common::{Block, BlockRules, Page, PageData, PageIndex, RenderRules, S
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
+pub const STATIC_ASSET_MAP_TEMPLATE_VAR: &str = "__static_asset_map";
 pub const TAILWIND_FILENAME_TEMPLATE_VAR: &str = "__tailwind_filename";
 
 // TODO not sure I necessarily want this specific impl...
@@ -38,7 +39,7 @@ fn make_partial_key(partial_path: &Utf8Path, current_dir: &Utf8Path) -> String {
 /// Helper fn for collecting layouts from a directory.
 fn collect_template_map(parser: &Parser, dir: &Utf8Path) -> HashMap<String, Template> {
     // TODO stuff like this should be parallelizable..
-    HashMap::from_iter(diskio::walk(dir, "liquid").map(|path| {
+    HashMap::from_iter(diskio::walk(dir, &Some("liquid")).map(|path| {
         let key = make_template_key(path.strip_prefix(dir).unwrap());
         let raw = fs::read_to_string(&path).unwrap();
         let layout = parser.parse(raw.trim()).unwrap();
@@ -120,11 +121,18 @@ pub struct Renderer {
     // TODO do we really want to have all layouts in memory at generation time?
     layouts: HashMap<String, Template>,
     block_content_template: Template,
+    static_asset_map: HashMap<String, String>,
+    // TODO nowadays can probably just get this from the static_asset_map.
     tailwind_filename: String,
 }
 
 impl Renderer {
-    pub fn new(config: &Config, css_file_name: String, partials: &[SiteEntry]) -> Self {
+    pub fn new(
+        config: &Config,
+        static_asset_map: HashMap<String, String>,
+        css_file_name: String,
+        partials: &[SiteEntry],
+    ) -> Self {
         let partials = partials
             .iter()
             .fold(Partials::empty(), |mut partials, site_entry| {
@@ -139,6 +147,7 @@ impl Renderer {
             // TODO don't think this is needed as is... but maybe interesting soon.
             .partials(partials)
             .tag(crate::liquid::tags::RenderBlockTag)
+            .tag(crate::liquid::tags::StaticAssetTag)
             .tag(crate::liquid::tags::TailwindTag)
             .filter(crate::liquid::filters::FirstBlockOfKind)
             .build()
@@ -157,6 +166,7 @@ impl Renderer {
         Self {
             layouts,
             block_content_template,
+            static_asset_map,
             tailwind_filename: css_file_name,
         }
     }
@@ -214,6 +224,7 @@ impl Renderer {
             "next_page_link": next_page_link, // TODO
             // TODO should be constants for these, since it's used in the tag.
             BLOCK_RULES_TEMPLATE_VAR: render_rules.block_rules,
+            STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
             TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
         });
         // TODO better not to discard the info from here
@@ -265,6 +276,7 @@ impl Renderer {
         let globals = liquid::object!({
             "meta": renderable.get_context(),
             "content": content,
+            STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
             TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
         });
         // TODO better not to discard the info from here

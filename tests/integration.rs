@@ -17,7 +17,7 @@ async fn generate_example_site() {
     generate(config).await.unwrap();
 
     let out_dir = example_project_dir.join("public");
-    let mut files: Vec<Utf8PathBuf> = walk(&out_dir, "html")
+    let mut files: Vec<Utf8PathBuf> = walk(&out_dir, &Some("html"))
         .map(|p| p.strip_prefix(&out_dir).unwrap().to_owned())
         .collect();
     files.sort();
@@ -30,7 +30,7 @@ async fn generate_example_site() {
         ]
     );
 
-    for file in walk(example_project_dir.join("public"), "html") {
+    for file in walk(example_project_dir.join("public"), &Some("html")) {
         let contents = std::fs::read_to_string(&file).unwrap();
         insta::assert_yaml_snapshot!(contents.split('\n').collect::<Vec<&str>>());
     }

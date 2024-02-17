@@ -17,12 +17,21 @@ pub fn read_file_contents<P: AsRef<Path>>(path: P) -> Mmap {
 /// Recursively iterate over all files in the given directory with the given extension.
 pub fn walk<'a, P: AsRef<Path>>(
     dir: P,
-    ext: &'a str,
+    ext: &'a Option<&'a str>,
 ) -> Box<dyn Iterator<Item = Utf8PathBuf> + 'a> {
     let walk = Walk::new(dir).flatten().filter_map(|entry| {
         let path = entry.path();
-        if path.is_file() && path.extension() == Some(ext.as_ref()) {
-            Some(Utf8PathBuf::from_path_buf(path.to_owned()).unwrap())
+        if path.is_file() {
+            match ext.as_ref() {
+                Some(ext) => {
+                    if path.extension() == Some(ext.as_ref()) {
+                        Some(Utf8PathBuf::from_path_buf(path.to_owned()).unwrap())
+                    } else {
+                        None
+                    }
+                }
+                None => Some(Utf8PathBuf::from_path_buf(path.to_owned()).unwrap()),
+            }
         } else {
             None
         }

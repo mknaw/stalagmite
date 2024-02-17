@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use stalagmite::{generate, project, run_dev_server, Config};
+use stalagmite::{bootstrap_cache, generate, project, run_server, Config};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -25,8 +25,8 @@ enum Commands {
     },
     /// Generate a static site from the current project.
     Gen,
-    /// Run a local development server.
-    DevServer,
+    /// Run a server.
+    Server,
 }
 
 #[derive(Subcommand)]
@@ -65,9 +65,12 @@ async fn main() {
         // TODO propagate the actual error
         Commands::Gen => {
             let config = Arc::new(Config::init(None).map_or_else(|e| panic!("{}", e), |c| c));
-            generate(config).await.expect("Error generating site");
+            let pool = bootstrap_cache().unwrap();
+            generate(config, Arc::new(pool))
+                .await
+                .expect("Error generating site");
         }
-        // TODO devserver should be an optional feature
-        Commands::DevServer => run_dev_server().await,
+        // TODO server should be an optional feature
+        Commands::Server => run_server().await,
     }
 }
