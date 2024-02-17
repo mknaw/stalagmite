@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -6,8 +7,11 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer_opt;
 use tower_http::services::ServeDir;
 
+use crate::Config;
+
 // TODO this is async-colored from `generate`, but doesn't actually exploit async otherwise
 async fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+    let config = Arc::new(Config::init(None).map_or_else(|e| panic!("{}", e), |c| c));
     let (tx, rx) = std::sync::mpsc::channel();
 
     let backend_config = notify::Config::default().with_poll_interval(Duration::from_secs(1));
@@ -22,6 +26,7 @@ async fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
         .unwrap();
 
     for res in rx {
+        let config = config.clone();
         match res {
             Ok(events) => {
                 let should_regenerate = events
@@ -31,7 +36,7 @@ async fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
                 // TODO should just use events as an input instead of collecting everything.
                 if should_regenerate {
                     tracing::info!("regenerating...");
-                    crate::generate().await.unwrap();
+                    crate::generate(config).await.unwrap();
                 }
             }
             Err(error) => println!("Error: {error:?}"),

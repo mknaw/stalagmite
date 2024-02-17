@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use clap::{Parser, Subcommand};
-use stalagmite::{generate, project, run_dev_server};
+use stalagmite::{generate, project, run_dev_server, Config};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -9,6 +11,9 @@ struct Cli {
     command: Commands,
 }
 
+// TODO other CLI arg ideas:
+// - path, so you don't have to invoke from project root
+// - --no-cache to force regeneration
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new stalagmite site.
@@ -58,7 +63,10 @@ async fn main() {
             }
         },
         // TODO propagate the actual error
-        Commands::Gen => generate().await.expect("Error generating site"),
+        Commands::Gen => {
+            let config = Arc::new(Config::init(None).map_or_else(|e| panic!("{}", e), |c| c));
+            generate(config).await.expect("Error generating site");
+        }
         // TODO devserver should be an optional feature
         Commands::DevServer => run_dev_server().await,
     }

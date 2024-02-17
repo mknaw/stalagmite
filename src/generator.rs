@@ -118,16 +118,14 @@ fn generate_listing<P: AsRef<Path>, R: Deref<Target = RenderRules>>(
 }
 
 /// Generate the site.
-pub async fn generate() -> anyhow::Result<()> {
+pub async fn generate(config: Arc<Config>) -> anyhow::Result<()> {
     let pool = Arc::new(cache::new_pool());
     let conn = pool.get()?;
     // TODO probably should be one big tx so idk about the pool...
     // Or maybe copy the whole DB?
     cache::init_cache(&conn).unwrap();
-    let config = Arc::new(Config::init().map_or_else(|e| panic!("{}", e), |c| c));
 
-    let config_clone = config.clone();
-    let site_nodes = diskio::collect_site_nodes(config_clone);
+    let site_nodes = diskio::collect_site_nodes(config.clone());
 
     let staging_dir = TempDir::new("stalagmite_staging").unwrap();
 

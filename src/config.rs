@@ -8,14 +8,15 @@ pub enum ConfigError {
     MissingLayout,
 }
 
+#[derive(Debug)]
 pub struct Config {
     pub project_dir: PathBuf,
     pub outdir: PathBuf,
 }
 
 impl Config {
-    pub fn init() -> Result<Self, ConfigError> {
-        let project_dir = std::env::current_dir().unwrap();
+    pub fn init(project_dir: Option<PathBuf>) -> Result<Self, ConfigError> {
+        let project_dir = project_dir.unwrap_or_else(|| std::env::current_dir().unwrap());
         let outdir = project_dir.join("public");
         // TODO the creation of outdir probably should happen somewhere else.
         if !outdir.is_dir() {

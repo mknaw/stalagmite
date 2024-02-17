@@ -1,0 +1,6 @@
+---
+source: tests/integration.rs
+expression: contents
+---
+"<!DOCTYPE html>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"UTF-8\">\n        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n        <title>Example Stalagmite Site</title>\n        <link rel=\"stylesheet\" href=\"/static/tw.css\">\n    </head>\n    <body>\n        <main>\n            <nav class=\"bg-gray-800\">\n                <div class=\"container mx-auto px-6 py-3\">\n                    <div class=\"flex justify-between items-center\">\n                        <div class=\"flex\">\n                            <div class=\"text-white text-lg font-semibold\">Stalagmite</div>\n                            <div class=\"ml-10 space-x-4\">\n                                <a href=\"#home\" class=\"text-gray-300 hover:text-white\">Home</a>\n                                <a href=\"#blog\" class=\"text-gray-300 hover:text-white\">Blog</a>\n                                <a href=\"#projects\" class=\"text-gray-300 hover:text-white\">Projects</a>\n                            </div>\n                        </div>\n                    </div>\n                </div>\n            </nav>\n\n            <div class=\"bg-blue-500\">Home page is here!</div>\n\n        </main>\n    </body>\n</html>"
+
