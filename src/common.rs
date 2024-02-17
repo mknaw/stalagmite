@@ -16,6 +16,8 @@ lazy_static! {
     });
 }
 
+pub const DEFAULT_LISTING_PAGE_SIZE: u8 = 100;
+
 #[derive(Debug, Clone)]
 pub enum PageType {
     Markdown,
@@ -43,7 +45,6 @@ pub struct SiteEntry {
     pub hash: OnceLock<String>,
 }
 
-// TODO ought to call this something else now... since it's not just for Pages, per se.
 impl SiteEntry {
     pub fn try_new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
         if matches!(
@@ -195,7 +196,7 @@ impl Page {
 }
 
 /// Contains one level of the site hierarchy.
-/// By design, each entry in the level shares the same `RenderRuleSet`.
+/// By design, each entry in the level shares the same `RenderRules`.
 /// We may want to process entries of a given layer in sequence, since we may need to generate
 /// listings pages as well, but otherwise, after the initial collection, `SiteNode`s can
 /// be processed in parallel.
@@ -220,7 +221,7 @@ pub struct RenderRules {
     pub layouts: Vec<String>,
     #[serde(rename = "blocks")]
     pub block_rules: Option<BlockRules>,
-    pub listing: Option<ListingRuleSet>,
+    pub listing: Option<ListingRules>,
 }
 
 impl RenderRules {
@@ -230,9 +231,9 @@ impl RenderRules {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ListingRuleSet {
+pub struct ListingRules {
     pub layouts: Vec<String>,
-    pub page_size: Option<usize>,
+    pub page_size: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -290,4 +291,4 @@ impl TryFrom<HashMap<&str, &str>> for FrontMatter {
 }
 
 /// Represents "page `i` of `n`".
-pub type PageIndex = (usize, usize);
+pub type PageIndex = (u8, u8);

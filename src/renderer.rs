@@ -103,13 +103,14 @@ struct ListingEntry {
     pub blocks: Vec<Block>,
 }
 
-impl From<&Markdown> for ListingEntry {
-    fn from(markdown: &Markdown) -> Self {
+impl From<&(Markdown, String)> for ListingEntry {
+    fn from(tup: &(Markdown, String)) -> Self {
+        let (markdown, url) = tup;
         Self {
             title: markdown.frontmatter.title.clone(),
             timestamp: markdown.frontmatter.timestamp,
             slug: markdown.frontmatter.slug.clone(),
-            link: "".to_owned(), // TODO !!!
+            link: url.clone(),
             blocks: markdown.blocks.clone(),
         }
     }
@@ -181,7 +182,7 @@ impl Renderer {
 
     pub fn render_listing_page<R: Deref<Target = RenderRules>>(
         &self,
-        markdowns: &[Markdown],
+        markdowns: &[(Markdown, String)],
         render_rules: &R,
         page_index: PageIndex,
     ) -> RenderResult<String> {
@@ -202,7 +203,7 @@ impl Renderer {
             // TODO have to get from some `dir_path` instead of hardcoding.
             Some(format!("/blog/{}/", page_index.0 - 1))
         };
-        let next_page_link = if page_index.0 == page_index.1 {
+        let next_page_link = if (page_index.0 + 1) == page_index.1 {
             None
         } else {
             Some(format!("/blog/{}/", page_index.0 + 1))

@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 
 use crate::common::*;
 use crate::parsers::markdown;
+use crate::utils::divide_round_up;
 use crate::{assets, cache, diskio, Config, Renderer};
 
 fn get_latest_modified(site_entries: &[SiteEntry]) -> u64 {
@@ -43,7 +44,7 @@ fn check_latest_modified_liquid(conn: &rusqlite::Connection, liquids: &[SiteEntr
     }
 }
 
-// TODO these don't actually need to be SiteEntrys... I just wanted to reuse `get_contents`.
+// TODO these don't actually need to be `SiteEntry`s... I just wanted to reuse `get_contents`.
 // Really could have a `StaticAsset` type.
 fn collect_liquids(config: &Config) -> Vec<SiteEntry> {
     let layouts = diskio::walk(&config.layouts_dir(), "liquid")
@@ -93,15 +94,26 @@ fn generate_listing<P: AsRef<Path>, R: Deref<Target = RenderRules>>(
     staging_dir: P,
     group_path: &str,
 ) -> anyhow::Result<()> {
+    // Should be OK to unwrap here.
+    let page_size = render_rules
+        .listing
+        .as_ref()
+        .unwrap()
+        .page_size
+        .unwrap_or(DEFAULT_LISTING_PAGE_SIZE);
     // TODO need to get the right pagination count.
     // TODO also should be able to restore cached renders from the db!
-    let page_info_iterator = cache::get_markdown_info_listing_iterator(conn, group_path, 100);
+    let page_count = divide_round_up(cache::get_page_group_count(conn, group_path)?, page_size);
+    let page_info_iterator = cache::get_markdown_info_listing_iterator(conn, group_path, page_size);
     for (index, group) in page_info_iterator.enumerate() {
         match group {
             Ok(markdowns) => {
                 // TODO need to get the page count (sqlite also).
-                let rendered =
-                    renderer.render_listing_page(&markdowns, render_rules, (index, 100))?;
+                let rendered = renderer.render_listing_page(
+                    &markdowns,
+                    render_rules,
+                    (index.try_into().unwrap(), page_count),
+                )?;
                 let out_path = staging_dir
                     .as_ref()
                     .join(group_path)

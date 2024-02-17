@@ -32,6 +32,6 @@ async fn generate_example_site() {
 
     for file in walk(example_project_dir.join("public"), "html") {
         let contents = std::fs::read_to_string(&file).unwrap();
-        insta::assert_yaml_snapshot!(contents);
+        insta::assert_yaml_snapshot!(contents.split('\n').collect::<Vec<&str>>());
     }
 }

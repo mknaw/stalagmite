@@ -189,12 +189,21 @@ fn cache_page(conn: &Connection, site_entry: &SiteEntry, rendered: &str) -> anyh
     Ok(())
 }
 
+pub fn get_page_group_count(conn: &Connection, parent_url: &str) -> anyhow::Result<u8> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM markdowns WHERE parent_url = ?",
+        [parent_url],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.into())
+}
+
 // Iterator that encapsulates SQLite query execution with offset and limit.
 pub struct MarkdownIterator<'a> {
-    limit: u32,
+    limit: u8,
     statement: Statement<'a>,
     parent_url: &'a str,
-    offset: u32,
+    offset: u8,
 }
 
 impl<'a> MarkdownIterator<'a> {
@@ -202,7 +211,7 @@ impl<'a> MarkdownIterator<'a> {
         conn: &'a Connection,
         parent_url: &'a str,
         query: &'a str,
-        limit: u32,
+        limit: u8,
     ) -> MarkdownIterator<'a> {
         MarkdownIterator {
             parent_url,
@@ -214,7 +223,7 @@ impl<'a> MarkdownIterator<'a> {
 }
 
 impl<'a> Iterator for MarkdownIterator<'a> {
-    type Item = Result<Vec<Markdown>>;
+    type Item = Result<Vec<(Markdown, String)>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let rows =
@@ -226,14 +235,15 @@ impl<'a> Iterator for MarkdownIterator<'a> {
                         frontmatter: serde_yaml::from_str(&frontmatter).unwrap(),
                         blocks: serde_yaml::from_str(&blocks).unwrap(),
                     };
-                    Ok(markdown)
+                    let url = row.get(2)?;
+                    Ok((markdown, url))
                 });
 
         self.offset += self.limit;
 
         match rows {
             Ok(rows) => {
-                let markdowns = rows.collect::<Result<Vec<Markdown>>>();
+                let markdowns = rows.collect::<Result<Vec<(Markdown, String)>>>();
                 if let Ok(mds) = &markdowns {
                     if mds.is_empty() {
                         return None;
@@ -249,12 +259,12 @@ impl<'a> Iterator for MarkdownIterator<'a> {
 pub fn get_markdown_info_listing_iterator<'a>(
     conn: &'a Connection,
     parent_url: &'a str,
-    limit: u32,
+    limit: u8,
 ) -> MarkdownIterator<'a> {
     MarkdownIterator::new(
         conn,
         parent_url,
-        "SELECT frontmatter, blocks
+        "SELECT frontmatter, blocks, url
         FROM markdowns
         WHERE parent_url = ?
         ORDER BY timestamp
