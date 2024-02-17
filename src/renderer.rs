@@ -9,7 +9,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::{Block, Page, PageData, PageIndex, RenderRules, SiteEntry, Token};
+use crate::core::{Block, BlockRules, Page, PageData, PageIndex, RenderRules, SiteEntry};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -68,7 +68,7 @@ impl Renderable<'_> {
         render_rules: &R,
     ) -> String {
         match self {
-            Self::Markdown(markdown) => renderer.render_blocks(markdown, render_rules),
+            Self::Markdown(md) => renderer.render_blocks(&md.blocks, &render_rules.block_rules),
             Self::Html(html) => html.to_string(),
         }
     }
@@ -119,7 +119,7 @@ impl From<&Markdown> for ListingEntry {
 pub struct Renderer {
     // TODO do we really want to have all layouts in memory at generation time?
     layouts: HashMap<String, Template>,
-    blocks: HashMap<String, Template>,
+    block_content_template: Template,
     tailwind_filename: String,
 }
 
@@ -148,11 +148,15 @@ impl Renderer {
         // and we've even done all the reading of those files etc.
         // Or maybe partials should really be partials and these things are kept as templates.
         let layouts = collect_template_map(&parser, &config.layouts_dir());
-        let blocks = collect_template_map(&parser, &config.blocks_dir());
+
+        // TODO this whole maneuver still seems kind of hacky, but it's better than prior art.
+        let block_content_template = parser
+            .parse("{% for block in blocks %}{% render_block block %}{% endfor %}")
+            .unwrap();
 
         Self {
             layouts,
-            blocks,
+            block_content_template,
             tailwind_filename: css_file_name,
         }
     }
@@ -258,10 +262,6 @@ impl Renderer {
         } else {
             self.render_content(renderable, render_rules, &layout_stack[1..])?
         };
-        // TODO this feels like improper use of the liquid concept...
-        // maybe there's a better way with defining a custom tag or whatever.
-        // works for now though. probably not good to allocate a new object just to pass around
-        // the same `meta` down the hierarchy.
         let globals = liquid::object!({
             "meta": renderable.get_context(),
             "content": content,
@@ -272,43 +272,11 @@ impl Renderer {
     }
 
     // TODO should be a `Result`.
-    fn render_blocks<R: Deref<Target = RenderRules>>(
-        &self,
-        page: &Markdown,
-        render_rules: &R,
-    ) -> String {
-        page.blocks
-            .iter()
-            .map(|block| self.render_block(block, render_rules))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    // TODO probably really should be a template tag?
-    // it would certainly make it easier to render some block in a listing page...
-    fn render_block<R: Deref<Target = RenderRules>>(
-        &self,
-        block: &Block,
-        render_rules: &R,
-    ) -> String {
-        let template_name = render_rules
-            .block_rules
-            .as_ref()
-            .and_then(|rules| rules.get(&block.kind).cloned())
-            .unwrap_or_else(|| block.kind.clone());
-        let template = self
-            .blocks
-            .get(&template_name)
-            // TODO really ought to error handle!
-            .unwrap_or_else(|| panic!("could not locate block template: {}", template_name));
-        let globals = liquid::object!({
-            "content": block.tokens.iter().map(|token| {
-                match token {
-                    Token::Literal(text) => text.clone(),
-                    Token::Block(nested) => self.render_block(nested, render_rules),
-                }
-            }).collect::<Vec<_>>().join(""),
+    fn render_blocks(&self, blocks: &[Block], block_rules: &Option<BlockRules>) -> String {
+        let ctx = liquid::object!({
+            "blocks": blocks,
+            BLOCK_RULES_TEMPLATE_VAR: block_rules,
         });
-        template.render(&globals).unwrap()
+        self.block_content_template.render(&ctx).unwrap()
     }
 }

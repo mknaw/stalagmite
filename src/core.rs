@@ -217,11 +217,13 @@ pub struct Markdown {
     pub blocks: Vec<Block>,
 }
 
+pub type BlockRules = HashMap<String, String>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderRules {
     pub layouts: Vec<String>,
     #[serde(rename = "blocks")]
-    pub block_rules: Option<HashMap<String, String>>,
+    pub block_rules: Option<BlockRules>,
     pub listing: Option<ListingRuleSet>,
 }
 

@@ -28,6 +28,7 @@ async fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
                     .iter()
                     // TODO may want to specify this path a bit better...
                     .any(|event| event.path.is_file() && !event.path.starts_with("./public"));
+                // TODO should just use events as an input instead of collecting everything.
                 if should_regenerate {
                     tracing::info!("regenerating...");
                     crate::generate().await.unwrap();

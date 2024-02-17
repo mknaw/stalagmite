@@ -54,7 +54,6 @@ fn find_partial_name(block_rules: &dyn ObjectView, kind: &str) -> Result<String>
     Ok(format!("blocks/{}.liquid", partial_name))
 }
 
-// TODO deduplicate this functionality vis-a-vis `render.rs`.
 fn render_block(
     runtime: &dyn Runtime,
     block: &dyn ObjectView,
