@@ -228,7 +228,7 @@ impl Renderer {
             TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
         });
         // TODO better not to discard the info from here
-        template.render(&globals).map_err(|e| e.into())
+        template.render(&globals).map_err(Into::into)
     }
 
     // TODO not sure `render` has to know that it is `Arc`,
@@ -280,7 +280,7 @@ impl Renderer {
             TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
         });
         // TODO better not to discard the info from here
-        template.render(&globals).map_err(|e| e.into())
+        template.render(&globals).map_err(Into::into)
     }
 
     // TODO should be a `Result`.

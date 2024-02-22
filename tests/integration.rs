@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use stalagmite::diskio::walk;
-use stalagmite::{generate, Config};
+use stalagmite::{bootstrap_cache, generate, Config};
 
 #[tokio::test]
 async fn generate_example_site() {
@@ -14,7 +14,9 @@ async fn generate_example_site() {
 
     let config = Arc::new(Config::init(Some(example_project_dir.clone())).unwrap());
 
-    generate(config).await.unwrap();
+    // TODO should have an in-memory sqlite for testing.
+    let pool = bootstrap_cache().unwrap();
+    generate(config, Arc::new(pool)).await.unwrap();
 
     let out_dir = example_project_dir.join("public");
     let mut files: Vec<Utf8PathBuf> = walk(&out_dir, &Some("html"))

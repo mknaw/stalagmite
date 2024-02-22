@@ -2,7 +2,7 @@ use std::io::Write;
 
 use liquid_core::runtime::Variable;
 use liquid_core::{
-    Error, Expression, Language, ObjectView, ParseTag, Renderable, Result, Runtime, TagReflection,
+    Error, Expression, Language, ParseTag, Renderable, Result, Runtime, TagReflection,
     TagTokenIter, ValueView,
 };
 
@@ -45,11 +45,20 @@ struct StaticAsset {
     filename: Expression,
 }
 
-fn find_cache_busted_filename(static_assets: &dyn ObjectView, filename: &str) -> Result<String> {
-    let cache_busted_name = static_assets
-        .get(filename)
-        .map_or(filename.to_string(), |v| v.to_kstr().as_str().to_string());
-    Ok(cache_busted_name)
+/// From the "alias" filename (e.g. "main.css") get the actual filename (e.g. "static/main-123456.css").
+pub fn get_actual_filename(alias: &str, runtime: &dyn Runtime) -> Result<String> {
+    // TODO this bit seems like a lot of fanfare to get the value of the var!
+    let static_asset_map_path = Variable::with_literal(STATIC_ASSET_MAP_TEMPLATE_VAR);
+    let static_asset_map_path = static_asset_map_path.evaluate(runtime)?;
+    // TODO has to be an `as_object`, but we could be more civil with an Err message.
+    let static_asset_map = runtime.get(&static_asset_map_path)?;
+    let static_asset_map = static_asset_map.as_object().unwrap();
+
+    let cache_busted = static_asset_map
+        .get(alias)
+        .map_or(alias.to_string(), |v| v.to_kstr().as_str().to_string());
+
+    Ok(format!("static/{}", cache_busted))
 }
 
 impl Renderable for StaticAsset {
@@ -61,17 +70,7 @@ impl Renderable for StaticAsset {
             .into_string()
             .into_string();
 
-        // TODO this bit seems like a lot of fanfare to get the value of the var!
-        let static_asset_map_path = Variable::with_literal(STATIC_ASSET_MAP_TEMPLATE_VAR);
-        let static_asset_map_path = static_asset_map_path.evaluate(runtime)?;
-        // TODO has to be an `as_object`, but we could be more civil with an Err message.
-        let static_asset_map = runtime.get(&static_asset_map_path)?;
-        let static_asset_map = static_asset_map.as_object().unwrap();
-
-        let cache_busted_filename = format!(
-            "static/{}",
-            find_cache_busted_filename(static_asset_map, &filename)?
-        );
+        let cache_busted_filename = get_actual_filename(&filename, runtime)?;
 
         // TODO really should convert to a liquid::Error
         writer.write_all(cache_busted_filename.as_bytes()).unwrap();

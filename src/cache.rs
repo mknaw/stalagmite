@@ -194,7 +194,7 @@ pub fn get_page_group_count(conn: &Connection, parent_url: &str) -> anyhow::Resu
         [parent_url],
         |row| row.get(0),
     )
-    .map_err(|e| e.into())
+    .map_err(Into::into)
 }
 
 // Iterator that encapsulates SQLite query execution with offset and limit.

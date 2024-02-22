@@ -3,6 +3,5 @@ static site generator, written in Rust. word on the street is every coder worth 
 
 TODO
 - [ ] be able to parse URLs in markdown: `[text](url)`
-- [ ] dev-server autoreload
 - [ ] sitemap
 - [ ] overuse of unwrap / expect
