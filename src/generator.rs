@@ -142,7 +142,11 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
 
     let templates = collect_templates(&config);
 
-    {
+    let (mut asset_map, assets_have_changed) =
+        assets::collect(&config, staging_dir.path(), &conn).unwrap();
+
+    let tailwind_alias = "tw.css".to_string();
+    let tailwind_cache_busted = {
         let mut class_collector = assets::ClassCollector::new();
         templates.iter().for_each(|pf| {
             assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
@@ -159,11 +163,9 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
                 assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
             });
 
-        assets::render_css(class_collector, true, &staging_dir).unwrap();
-    }
-
-    let (asset_map, assets_have_changed) =
-        assets::collect(&config, staging_dir.path(), &conn).unwrap();
+        assets::render_css(&tailwind_alias, class_collector, true, &staging_dir)?
+    };
+    asset_map.insert(tailwind_alias.to_string(), tailwind_cache_busted);
 
     let renderer = Arc::new(Renderer::new(
         &config,
@@ -193,8 +195,9 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
             // - for the assets, just leave the non cache-busted name for a second pass
             // - the templates would be a bit trickier, but should be able to determine which
             //   template needed for which render, and skip there.
-            let force_render =
-                assets_have_changed || check_latest_modified_template(conn, &templates);
+            let force_render = config.no_cache
+                || assets_have_changed
+                || check_latest_modified_template(conn, &templates);
             site_nodes
                 .into_iter()
                 .try_for_each(|node| -> Result<(), anyhow::Error> {
@@ -213,7 +216,7 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
                                         staging_dir.as_path(),
                                     ) {
                                         Ok(_) => {
-                                            tracing::debug!(
+                                            tracing::info!(
                                                 "copied previously generated file for {:?}",
                                                 &site_entry.out_path
                                             );

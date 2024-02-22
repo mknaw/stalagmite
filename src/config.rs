@@ -11,6 +11,7 @@ pub enum ConfigError {
 pub struct Config {
     pub project_dir: Utf8PathBuf,
     pub outdir: Utf8PathBuf,
+    pub no_cache: bool,
 }
 
 impl Config {
@@ -26,7 +27,13 @@ impl Config {
         Ok(Self {
             project_dir,
             outdir,
+            no_cache: false,
         })
+    }
+
+    pub fn with_no_cache(mut self, no_cache: bool) -> Self {
+        self.no_cache = no_cache;
+        self
     }
 
     pub fn layouts_dir(&self) -> Utf8PathBuf {

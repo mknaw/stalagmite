@@ -55,10 +55,9 @@ pub fn collect_classes(html: &str, class_collector: &mut ClassCollector) {
 }
 
 // Copy pasta from `railwind` library. Unfortunately, the library isn't very flexible.
-fn parse_classes(class_collector: &ClassCollector) -> Vec<ParsedClass> {
+fn parse_classes<'a>(sorted_classes: &'a [&'a String]) -> Vec<ParsedClass<'a>> {
     let position = Position::new("", 0, 0);
-    class_collector
-        .0
+    sorted_classes
         .iter()
         .filter_map(
             |raw_str| match ParsedClass::new_from_raw_class(raw_str, position.clone()) {
@@ -94,12 +93,18 @@ fn make_cache_busted_name(path: &Path, hash: &str) -> OsString {
     ))
 }
 
+/// Render the CSS and write it to the output directory.
 pub fn render_css<P: AsRef<Path>>(
+    base_name: &str,
     class_collector: ClassCollector,
     minify: bool,
     out_dir: P,
 ) -> Result<String, StyleError> {
-    let parsed_classes = parse_classes(&class_collector);
+    // With our cache-busting technique, it's important to produce deterministic results,
+    // so we sort the classes before hashing them.
+    let mut sorted_classes = class_collector.0.iter().collect::<Vec<_>>();
+    sorted_classes.sort();
+    let parsed_classes = parse_classes(&sorted_classes);
     let styles = generate_strings(parsed_classes);
     let raw = styles.join("\n");
     let css = if minify {
@@ -122,7 +127,7 @@ pub fn render_css<P: AsRef<Path>>(
     // parallel. meanwhile we'd like to know the tailwind.css file name before we start rendering
     // templates, so we can programmatically list the correct name.
     let hash = utils::hash(css);
-    let filename = make_cache_busted_name(Path::new("tw.css"), &hash);
+    let filename = make_cache_busted_name(Path::new(base_name), &hash);
 
     let static_dir = out_dir.as_ref().join("static");
     std::fs::create_dir_all(&static_dir).unwrap();

@@ -1,9 +1,7 @@
-document.addEventListener('DOMContentLoaded', function() {
-    // Your code goes here
-    console.log("Document is ready!");
-
+document.addEventListener("DOMContentLoaded", function() {
     if (typeof (EventSource) !== "undefined") {
         var source = new EventSource("/__dev_reload");
+        console.log("Serving with dev mode - listening to reload SSEs...")
 
         source.onmessage = () => {
             window.location.reload();

@@ -24,9 +24,15 @@ enum Commands {
         add_command: AddCommand,
     },
     /// Generate a static site from the current project.
-    Gen,
+    Gen {
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
+    },
     /// Run a server.
-    Server,
+    Server {
+        #[arg(long, default_value_t = false)]
+        dev: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -40,6 +46,7 @@ enum AddCommand {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let config = Config::init(None).unwrap();
     let cli = Cli::parse();
     match &cli.command {
         Commands::Init => match project::initialize() {
@@ -53,24 +60,24 @@ async fn main() {
         // TODO (maybe): these path arguments are pretty UNIX centric...
         Commands::Add { add_command } => match add_command {
             AddCommand::Page { path, title } => {
-                project::add_page(path, title).unwrap();
+                project::add_page(config, path, title).unwrap();
                 println!("Added page at {} with title {}", path, title);
             }
             AddCommand::Layout { .. } => unimplemented!(),
             AddCommand::Rules { path } => {
-                project::add_rule_set(path).unwrap();
+                project::add_rule_set(config, path).unwrap();
                 println!("Added rule set at {}", path);
             }
         },
         // TODO propagate the actual error
-        Commands::Gen => {
-            let config = Arc::new(Config::init(None).map_or_else(|e| panic!("{}", e), |c| c));
+        Commands::Gen { no_cache } => {
+            let config = config.with_no_cache(*no_cache);
             let pool = bootstrap_cache().unwrap();
-            generate(config, Arc::new(pool))
+            generate(Arc::new(config), Arc::new(pool))
                 .await
                 .expect("Error generating site");
         }
         // TODO server should be an optional feature
-        Commands::Server => run_server().await,
+        Commands::Server { dev } => run_server(Arc::new(config), *dev).await,
     }
 }

@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::{env, fs, io};
 
 use chrono::prelude::*;
@@ -7,6 +7,7 @@ use include_dir::{include_dir, Dir};
 use thiserror::Error;
 
 use crate::utils::slugify;
+use crate::Config;
 
 static INIT_ASSETS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/init");
 
@@ -49,22 +50,6 @@ impl PageMeta {
     }
 }
 
-/// Locate the `/pages/` directory in which we expect to find markdown and HTML files.
-fn get_pages_dir() -> io::Result<PathBuf> {
-    // TODO should we get this from Config or something?
-    let dir = env::current_dir()?;
-    let pages_dir = dir.join("pages");
-    if pages_dir.exists() && pages_dir.is_dir() {
-        Ok(pages_dir)
-    } else {
-        // TODO really ought to define our own `Error`s, as usual
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "No stalagmite project found",
-        ))
-    }
-}
-
 /// Copy over the starter assets to the current directory when the CLI `init` is called.
 // TODO starting to doubt this is the way, maybe should just fallback on some include_str!?
 fn copy_init_assets(asset_dir: &Dir, fs_dir: &Path) -> io::Result<()> {
@@ -90,11 +75,10 @@ pub fn initialize() -> ProjectResult<()> {
 }
 
 /// Create a new markdown within the specified ./pages `path`.
-pub fn add_page(path: &str, title: &str) -> io::Result<()> {
-    let pages_dir = get_pages_dir()?;
+pub fn add_page(config: Config, path: &str, title: &str) -> io::Result<()> {
     // TODO there are all sorts of fucked up strings users could pass,
     // so maybe greater caution before performing this join would be necessary.
-    let mut page_path = pages_dir.join(path);
+    let mut page_path = config.pages_dir().join(path);
     fs::create_dir_all(&page_path)?;
 
     // TODO the `slugify` should be the default, but should also allow
@@ -113,9 +97,8 @@ pub fn add_page(path: &str, title: &str) -> io::Result<()> {
 }
 
 /// Create a new `rules.yaml` within the specified ./pages `path`.
-pub fn add_rule_set(path: &str) -> io::Result<()> {
-    let pages_dir = get_pages_dir()?;
-    let dir = pages_dir.join(path);
+pub fn add_rule_set(config: Config, path: &str) -> io::Result<()> {
+    let dir = config.pages_dir().join(path);
     if !dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
