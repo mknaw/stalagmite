@@ -7,7 +7,7 @@ use std::{fs, thread};
 
 use anyhow::anyhow;
 use rayon::prelude::*;
-use tempdir::TempDir;
+use tempfile::tempdir;
 use tokio::task::JoinSet;
 
 use crate::cache::Pool;
@@ -138,7 +138,7 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
 
     let site_nodes = diskio::collect_site_nodes(config.clone());
 
-    let staging_dir = TempDir::new("stalagmite_staging").unwrap();
+    let staging_dir = tempdir()?;
 
     let templates = collect_templates(&config);
 
