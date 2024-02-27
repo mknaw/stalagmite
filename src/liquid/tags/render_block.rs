@@ -87,10 +87,13 @@ fn render_block(
         .collect::<Vec<String>>()
         .join("");
 
+    let meta = block.get("meta").map(|v| v.to_value());
+
     let partial_name = find_partial_name(block_rules, &kind)?;
     let partial = runtime.partials().get(&partial_name)?;
     let pass_through = liquid::object!({
         "content": content,
+        "meta": meta,
     });
     let scope = StackFrame::new(runtime, &pass_through);
     partial.render(&scope)

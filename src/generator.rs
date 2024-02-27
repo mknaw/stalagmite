@@ -59,7 +59,7 @@ fn parse_page(site_entry: SiteEntry) -> anyhow::Result<Page> {
     match site_entry.get_page_type() {
         PageType::Markdown => {
             let contents = site_entry.get_contents()?;
-            let markdown = markdown::parse(contents.as_bytes())?;
+            let markdown = markdown::parse(contents)?;
             Ok(Page::new_markdown_page(site_entry, markdown))
         }
         PageType::Liquid => Ok(Page::new_liquid_page(site_entry)),

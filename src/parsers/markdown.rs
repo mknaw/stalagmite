@@ -22,8 +22,8 @@ pub enum MarkdownError {
     ParseError,
 }
 
-// TODO should probably just operate on &str, since I've already decoded contents
-pub fn parse(contents: &[u8]) -> MarkdownResult<Markdown> {
+/// Parse a `Markdown` struct from a `&str` of .md contents.
+pub fn parse(contents: &str) -> MarkdownResult<Markdown> {
     let (frontmatter, offset) = parse_frontmatter(contents)?;
     let blocks = parse_blocks(&contents[offset..]);
     Ok(Markdown {
@@ -32,16 +32,15 @@ pub fn parse(contents: &[u8]) -> MarkdownResult<Markdown> {
     })
 }
 
-pub fn parse_frontmatter(contents: &[u8]) -> MarkdownResult<(FrontMatter, usize)> {
-    fn parse(input: &[u8]) -> IResult<&[u8], FrontMatter> {
+/// Parse the `FrontMatter` section of the contents.
+pub fn parse_frontmatter(contents: &str) -> MarkdownResult<(FrontMatter, usize)> {
+    fn parse(input: &str) -> IResult<&str, FrontMatter> {
         let (input, _) = many0(newline)(input)?;
-        let (input, frontmatter_raw) =
-            delimited(tag(b"---"), take_until("---"), tag(b"---"))(input)?;
+        let (input, frontmatter_raw) = delimited(tag("---"), take_until("---"), tag("---"))(input)?;
         let (input, _) = many0(newline)(input)?;
         // TODO lightly gross to first allocate the `HashMap` just to try to supply some programmatic
         // defaults to the `FrontMatter` struct. Maybe there's a better way
-        let frontmatter: HashMap<&str, &str> = serde_yaml::from_slice(frontmatter_raw).unwrap();
-        // TODO this fn doesn't really have to return an IResult ... we don't care about rest of str
+        let frontmatter: HashMap<&str, &str> = serde_yaml::from_str(frontmatter_raw).unwrap();
         Ok((input, frontmatter.try_into().unwrap()))
     }
     let total_len = contents.len();
@@ -51,10 +50,19 @@ pub fn parse_frontmatter(contents: &[u8]) -> MarkdownResult<(FrontMatter, usize)
 }
 
 /// Parse out the `body` of the post, which is composed of `Block`s.
-pub fn parse_blocks(contents: &[u8]) -> Vec<Block> {
-    // TODO should be able to do it without reading to &str, perhaps with `nom`.
-    let contents = std::str::from_utf8(contents).unwrap();
+pub fn parse_blocks(contents: &str) -> Vec<Block> {
     contents.trim().split("\n\n").map(parse_block).collect()
+}
+
+/// Parse a single chunk of text into a `Block`.
+fn parse_block(content: &str) -> Block {
+    // TODO nested block support, like links etc.
+    let (content, kind) = opt(parse_kind)(content).unwrap();
+    Block {
+        kind: kind.map_or("p".to_string(), |k| k.to_string()),
+        tokens: parse_inner(content),
+        meta: None,
+    }
 }
 
 /// Try parsing non-default `Block` `kind`s, which determine the rendering of the block.
@@ -78,16 +86,6 @@ fn parse_kind(input: &str) -> IResult<&str, &str> {
     Ok((input, kind))
 }
 
-/// Parse a single chunk of text into a `Block`.
-fn parse_block(content: &str) -> Block {
-    // TODO nested block support, like links etc.
-    let (content, kind) = opt(parse_kind)(content).unwrap();
-    Block {
-        kind: kind.map_or("p".to_string(), |k| k.to_string()),
-        tokens: parse_inner(content),
-    }
-}
-
 fn parse_nested_special_token<'a>(
     delimiter: char,
     kind: &'a str,
@@ -102,9 +100,30 @@ fn parse_nested_special_token<'a>(
             Token::Block(Block {
                 kind: kind.to_string(),
                 tokens,
+                meta: None,
             }),
         ))
     }
+}
+
+fn parse_link_tag(input: &str) -> IResult<&str, Token> {
+    let (input, _) = char('[')(input)?;
+    let (input, content) = take_while(|c| c != ']')(input)?;
+    let (input, _) = char(']')(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, url) = take_while(|c| c != ')')(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        Token::Block(Block {
+            kind: "a".to_string(),
+            tokens: vec![Token::Literal(content.to_string())],
+            meta: Some(HashMap::from_iter(vec![(
+                "href".to_string(),
+                url.to_string(),
+            )])),
+        }),
+    ))
 }
 
 // TODO this looks terrible, but I gues it works for now.
@@ -117,6 +136,7 @@ fn parse_inner(content: &str) -> Vec<Token> {
             parse_nested_special_token('`', "code"),
             parse_nested_special_token('*', "b"),
             parse_nested_special_token('_', "i"),
+            parse_link_tag,
         )))(content)
         .unwrap();
         content = if let Some(nested) = nested {
@@ -145,8 +165,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_markdown_test() {
-        let input = br#"
+    fn test_parse_markdown() {
+        let input = r#"
 ---
 title: Excellent Blog Post
 timestamp: 2023-10-21T10:00:00-05:00
@@ -183,7 +203,7 @@ Then I'd like to add another paragraph.
     }
 
     #[test]
-    fn parse_parse_nested_special_token() {
+    fn test_parse_nested_special_token() {
         let input = "`code is here`";
         let parser = parse_nested_special_token('`', "code");
         let (_, token) = opt(parser)(input).unwrap();
@@ -192,7 +212,29 @@ Then I'd like to add another paragraph.
             Some(Token::Block(Block {
                 kind: "code".to_string(),
                 tokens: vec![Token::Literal("code is here".to_string())],
+                meta: None,
             })),
+        );
+    }
+
+    #[test]
+    fn test_parse_link_tag() {
+        let input = "This is a [link](https://example.com).";
+        let tokens = parse_inner(input);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Literal("This is a ".to_string()),
+                Token::Block(Block {
+                    kind: "a".to_string(),
+                    tokens: vec![Token::Literal("link".to_string())],
+                    meta: Some(HashMap::from_iter(vec![(
+                        "href".to_string(),
+                        "https://example.com".to_string()
+                    )])),
+                }),
+                Token::Literal(".".to_string())
+            ],
         );
     }
 }

@@ -111,7 +111,7 @@ impl From<&(Markdown, String)> for ListingEntry {
             title: markdown.frontmatter.title.clone(),
             timestamp: markdown.frontmatter.timestamp,
             slug: markdown.frontmatter.slug.clone(),
-            link: url.clone(),
+            link: format!("/{}", url),
             blocks: markdown.blocks.clone(),
         }
     }

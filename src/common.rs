@@ -240,6 +240,7 @@ pub struct ListingRules {
 pub struct Block {
     pub kind: String, // TODO want to avoid alloc here!
     pub tokens: Vec<Token>,
+    pub meta: Option<HashMap<String, String>>,
     // TODO will need to include something extra to represent arbitrary metadata
     // in particular, the URLs of links.
 }
