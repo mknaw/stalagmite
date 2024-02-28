@@ -16,8 +16,8 @@ use crate::parsers::markdown;
 use crate::utils::divide_round_up;
 use crate::{assets, cache, diskio, Config, Renderer};
 
-fn get_latest_modified(site_entries: &[SiteEntry]) -> u64 {
-    site_entries
+fn get_latest_modified(templates: &[ContentFile]) -> u64 {
+    templates
         .iter()
         .map(|p| p.abs_path.metadata().unwrap().modified().unwrap())
         .max()
@@ -28,8 +28,8 @@ fn get_latest_modified(site_entries: &[SiteEntry]) -> u64 {
         .as_secs()
 }
 
-fn check_latest_modified_template(conn: &rusqlite::Connection, liquids: &[SiteEntry]) -> bool {
-    let files_ts = get_latest_modified(liquids);
+fn check_latest_modified_template(conn: &rusqlite::Connection, templates: &[ContentFile]) -> bool {
+    let files_ts = get_latest_modified(templates);
     if let Some(cache_ts) = cache::get_latest_template_modified(conn).unwrap() {
         // TODO really have to roll this back if we blow up later in the generation...
         tracing::debug!("files_ts: {}, cache_ts: {}", files_ts, cache_ts);
@@ -45,25 +45,23 @@ fn check_latest_modified_template(conn: &rusqlite::Connection, liquids: &[SiteEn
     }
 }
 
-// TODO these don't actually need to be `SiteEntry`s... I just wanted to reuse `get_contents`.
-// Really could have a `StaticAsset` type.
-fn collect_templates(config: &Config) -> Vec<SiteEntry> {
+fn collect_templates(config: &Config) -> Vec<ContentFile> {
     let layouts = diskio::walk(&config.layouts_dir(), &Some("liquid"))
-        .map(|path| SiteEntry::try_new(&config.layouts_dir(), path).unwrap());
+        .map(|path| ContentFile::new(&config.layouts_dir(), path));
     let blocks = diskio::walk(&config.blocks_dir(), &Some("liquid"))
-        .map(|path| SiteEntry::try_new(&config.blocks_dir(), path).unwrap());
+        .map(|path| ContentFile::new(&config.blocks_dir(), path));
     layouts.chain(blocks).collect()
 }
 
-fn parse_page(site_entry: SiteEntry) -> anyhow::Result<Page> {
+fn parse_page_data(site_entry: &SiteEntry) -> anyhow::Result<PageData> {
     match site_entry.get_page_type() {
         PageType::Markdown => {
-            let contents = site_entry.get_contents()?;
+            let contents = site_entry.file.get_contents()?;
             let markdown = markdown::parse(contents)?;
-            Ok(Page::new_markdown_page(site_entry, markdown))
+            Ok(PageData::Markdown(markdown))
         }
-        PageType::Liquid => Ok(Page::new_liquid_page(site_entry)),
-        PageType::Html => Ok(Page::new_html_page(site_entry)),
+        PageType::Liquid => Ok(PageData::Liquid),
+        PageType::Html => Ok(PageData::Html),
     }
 }
 
@@ -83,7 +81,7 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     } else {
         Err(anyhow!(
             "no previously generated file found for {:?}",
-            site_entry.rel_path
+            site_entry.file.rel_path
         ))
     }
 }
@@ -157,10 +155,10 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
             .flat_map(|node| {
                 node.site_entries
                     .iter()
-                    .filter(|pf| matches!(pf.get_page_type(), PageType::Html))
+                    .filter(|se| matches!(se.get_page_type(), PageType::Html))
             })
-            .for_each(|pf| {
-                assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
+            .for_each(|se| {
+                assets::collect_classes(se.file.get_contents().unwrap(), &mut class_collector)
             });
 
         assets::render_css(&tailwind_alias, class_collector, true, &staging_dir)?
@@ -177,7 +175,7 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
     tracing::debug!("collected {} site nodes", site_nodes.len());
 
     let (render_tx, render_rx) = channel::<(SiteEntry, Arc<RenderRules>)>();
-    let (post_render_tx, post_render_rx) = channel::<(Page, String)>();
+    let (post_render_tx, post_render_rx) = channel::<(SiteEntry, PageData, String)>();
 
     let (render_listing_tx, render_listing_rx) = channel::<(String, Arc<RenderRules>)>();
 
@@ -201,26 +199,25 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
             site_nodes
                 .into_iter()
                 .try_for_each(|node| -> Result<(), anyhow::Error> {
-                    let result = node.site_entries.iter().try_for_each(
+                    let result = node.site_entries.into_iter().try_for_each(
                         |site_entry| -> Result<(), anyhow::Error> {
                             // If `liquids_were_modified`, we know we have to rerender anyway.
                             if !force_render {
-                                if let Some((page, rendered)) =
-                                    cache::restore_cached(conn, site_entry.clone())?
+                                if let Some((page_data, rendered)) =
+                                    cache::restore_cached(conn, &site_entry)?
                                 {
-                                    // TODO probably should use tokio `copy` and do this with some
-                                    // concurrency?
                                     match copy_previously_generated(
                                         &config,
-                                        site_entry,
+                                        &site_entry,
                                         staging_dir.as_path(),
                                     ) {
                                         Ok(_) => {
                                             tracing::info!(
                                                 "copied previously generated file for {:?}",
-                                                &site_entry.out_path
+                                                site_entry.out_path
                                             );
-                                            post_render_tx.send((page, rendered))?;
+                                            post_render_tx
+                                                .send((site_entry, page_data, rendered))?;
                                             return Ok(());
                                         }
                                         Err(e) => {
@@ -233,7 +230,7 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
                                 }
                             }
                             render_tx
-                                .send((site_entry.clone(), node.render_rules.clone()))
+                                .send((site_entry, node.render_rules.clone()))
                                 .map_err(|e| anyhow!(e))
                         },
                     );
@@ -258,10 +255,12 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
                 .into_iter()
                 .par_bridge()
                 .try_for_each(|(site_entry, render_rules)| -> Result<(), anyhow::Error> {
-                    tracing::debug!("rendering page: {:?}", site_entry.rel_path);
-                    let page = parse_page(site_entry.clone()).unwrap();
-                    let rendered = renderer.render_page(&page, &render_rules)?;
-                    post_render_tx.send((page, rendered)).unwrap();
+                    tracing::debug!("rendering page: {:?}", site_entry.file.rel_path);
+                    let page_data = parse_page_data(&site_entry).unwrap();
+                    let rendered = renderer.render_page(&page_data, &site_entry, &render_rules)?;
+                    post_render_tx
+                        .send((site_entry, page_data, rendered))
+                        .unwrap();
                     Ok(())
                 })
                 .unwrap();
@@ -272,7 +271,7 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
     // so maybe need something better than this.
     let mut join_set = JoinSet::new();
 
-    for (page, rendered) in post_render_rx.iter() {
+    for (site_entry, page_data, rendered) in post_render_rx.iter() {
         let staging_path = staging_dir.clone();
         let pool = pool.clone();
         // TODO probably not even worth doing async... probably better to just thread it...
@@ -280,8 +279,8 @@ pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()
             tracing::debug!("writing rendered page to disk");
             // TODO really should use async rusqlite for this...
             let conn = &pool.get().unwrap();
-            cache::cache(conn, &page, &rendered).unwrap();
-            diskio::write_html(staging_path.join(&page.file.out_path), &rendered).await?;
+            cache::cache(conn, page_data, &site_entry, &rendered).unwrap();
+            diskio::write_html(staging_path.join(&site_entry.out_path), &rendered).await?;
             Ok::<(), anyhow::Error>(())
         });
     }

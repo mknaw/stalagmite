@@ -25,24 +25,70 @@ pub enum PageType {
     Html,
 }
 
-/// Representation of the filesystem path of a page to render.
-#[derive(Debug, Clone)]
-pub struct SiteEntry {
-    // TODO not sure I really want the rel_path, abs_path thing...
+#[derive(Debug)]
+pub struct ContentFile {
     // Absolute path of the file.
     pub abs_path: Utf8PathBuf,
     // Path relative to the pages directory.
     pub rel_path: Utf8PathBuf,
+    // File contents.
+    pub contents: OnceLock<String>,
+    // Cached content hash.
+    pub hash: OnceLock<String>,
+}
+
+impl ContentFile {
+    pub fn new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> Self {
+        let rel_path = abs_path.strip_prefix(pages_dir).unwrap().to_owned();
+        Self {
+            abs_path,
+            rel_path,
+            contents: OnceLock::new(),
+            hash: OnceLock::new(),
+        }
+    }
+
+    /// Returns the absolute path of the directory containing the file.
+    pub fn abs_dir(&self) -> Utf8PathBuf {
+        self.abs_path.parent().unwrap().to_owned()
+    }
+
+    /// Returns the relative path of the directory containing the file.
+    pub fn rel_dir(&self) -> Utf8PathBuf {
+        self.rel_path.parent().unwrap().to_owned()
+    }
+
+    /// Initialize the file content cache and return the contents.
+    pub fn get_contents(&self) -> anyhow::Result<&str> {
+        self.contents
+            .get_or_try_init(|| {
+                std::fs::read(&self.abs_path)
+                    .map(|c| std::str::from_utf8(&c).unwrap().to_string())
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .map(|c| c.as_str())
+    }
+
+    /// Initialize the file hash cache and return the hash.
+    pub fn get_hash(&self) -> anyhow::Result<&str> {
+        self.hash
+            .get_or_try_init(|| {
+                let contents = self.get_contents()?;
+                Ok(utils::hash(contents.as_bytes()))
+            })
+            .map(|h| h.as_str())
+    }
+}
+
+/// Representation of the filesystem path of a page to render.
+#[derive(Debug)]
+pub struct SiteEntry {
+    // The actual underlying file info.
+    pub file: ContentFile,
     // Desired output path, relative to the output directory.
     pub out_path: Utf8PathBuf,
     // Relative url path.
     pub url_path: String,
-    // Cached file contents.
-    // TODO this might not be so good...
-    // we might be keeping the contents in memory for a long time.
-    pub contents: OnceLock<String>,
-    // Cached content hash.
-    pub hash: OnceLock<String>,
 }
 
 impl SiteEntry {
@@ -51,8 +97,10 @@ impl SiteEntry {
             abs_path.extension(),
             Some("md") | Some("liquid") | Some("html")
         ) {
-            let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
-            let mut out_path = rel_path
+            let file = ContentFile::new(pages_dir, abs_path);
+            // let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
+            let mut out_path = file
+                .rel_path
                 .with_extension("")
                 .components()
                 .map(|c| slugify(c.as_os_str().to_str().unwrap()))
@@ -72,12 +120,9 @@ impl SiteEntry {
             let url_path = format!("{}/", out_path.parent().unwrap());
 
             Ok(Self {
-                abs_path,
-                rel_path,
+                file,
                 out_path,
                 url_path,
-                contents: OnceLock::new(),
-                hash: OnceLock::new(),
             })
         } else {
             anyhow::bail!("Invalid file type")
@@ -86,22 +131,12 @@ impl SiteEntry {
 
     /// Returns the type of the file.
     pub fn get_page_type(&self) -> PageType {
-        match self.rel_path.extension() {
+        match self.file.rel_path.extension() {
             Some("md") => PageType::Markdown,
             Some("liquid") => PageType::Liquid,
             Some("html") => PageType::Html,
             _ => panic!("Unknown file type"),
         }
-    }
-
-    /// Returns the absolute path of the directory containing the file.
-    pub fn abs_dir(&self) -> Utf8PathBuf {
-        self.abs_path.parent().unwrap().to_owned()
-    }
-
-    /// Returns the relative path of the directory containing the file.
-    pub fn rel_dir(&self) -> Utf8PathBuf {
-        self.rel_path.parent().unwrap().to_owned()
     }
 
     pub fn parent_url(&self) -> String {
@@ -119,80 +154,6 @@ impl SiteEntry {
         }
         segments[..segments.len() - 1].join("/")
     }
-
-    pub fn get_contents(&self) -> anyhow::Result<&str> {
-        self.contents
-            .get_or_try_init(|| {
-                std::fs::read(&self.abs_path)
-                    .map(|c| std::str::from_utf8(&c).unwrap().to_string())
-                    .map_err(|e| anyhow::anyhow!("{}", e))
-            })
-            .map(|c| c.as_str())
-    }
-
-    pub fn get_hash(&self) -> anyhow::Result<&str> {
-        self.hash
-            .get_or_try_init(|| {
-                let contents = self.get_contents()?;
-                Ok(utils::hash(contents.as_bytes()))
-            })
-            .map(|h| h.as_str())
-    }
-}
-
-#[derive(Debug)]
-pub struct Page {
-    pub file: SiteEntry,
-    pub data: PageData,
-}
-
-#[derive(Debug)]
-pub enum PageData {
-    Markdown(Markdown),
-    Liquid,
-    Html,
-}
-
-trait GenericPage {
-    fn get_url(&self) -> String;
-}
-
-impl Page {
-    pub fn new_markdown_page(file: SiteEntry, markdown: Markdown) -> Self {
-        Self {
-            file,
-            data: PageData::Markdown(markdown),
-        }
-    }
-
-    pub fn new_liquid_page(file: SiteEntry) -> Self {
-        Self {
-            file,
-            data: PageData::Liquid,
-        }
-    }
-
-    pub fn new_html_page(file: SiteEntry) -> Self {
-        Self {
-            file,
-            data: PageData::Html,
-        }
-    }
-
-    // TODO verify that data matches file.file_type?
-    pub fn get_url(&self) -> String {
-        match &self.data {
-            PageData::Markdown(md) => {
-                format!("{:?}/{}", self.file.rel_dir(), md.frontmatter.slug)
-            }
-            PageData::Liquid => unimplemented!(),
-            PageData::Html => self.file.rel_path.as_str().to_owned(),
-        }
-    }
-
-    pub fn get_link(&self) -> String {
-        format!("{}/", self.file.out_path.parent().unwrap().to_owned(),)
-    }
 }
 
 /// Contains one level of the site hierarchy.
@@ -202,10 +163,17 @@ impl Page {
 /// be processed in parallel.
 #[derive(Debug)]
 pub struct SiteNode {
-    // TODO still needed? Feels like one could get away with just the info on `FileEntry`.
+    // TODO still needed? Feels like one could get away with just the info on `ContentFile`.
     pub dir: Utf8PathBuf,
     pub render_rules: Arc<RenderRules>,
     pub site_entries: Vec<SiteEntry>,
+}
+
+#[derive(Debug)]
+pub enum PageData {
+    Markdown(Markdown),
+    Liquid,
+    Html,
 }
 
 #[derive(Debug, Serialize)]

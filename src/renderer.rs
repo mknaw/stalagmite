@@ -9,7 +9,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::common::{Block, BlockRules, Page, PageData, PageIndex, RenderRules, SiteEntry};
+use crate::common::{Block, BlockRules, ContentFile, PageData, PageIndex, RenderRules, SiteEntry};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -131,7 +131,7 @@ impl Renderer {
         config: &Config,
         static_asset_map: HashMap<String, String>,
         css_file_name: String,
-        partials: &[SiteEntry],
+        partials: &[ContentFile],
     ) -> Self {
         let partials = partials
             .iter()
@@ -180,13 +180,16 @@ impl Renderer {
 
     pub fn render_page<R: Deref<Target = RenderRules>>(
         &self,
-        page: &Page,
+        page_data: &PageData,
+        site_entry: &SiteEntry,
         render_rules: &R,
     ) -> RenderResult<String> {
-        match &page.data {
-            PageData::Markdown(md) => self.render_markdown(&page.file, md, render_rules),
+        match page_data {
+            PageData::Markdown(md) => self.render_markdown(site_entry, md, render_rules),
             PageData::Liquid => unimplemented!(),
-            PageData::Html => self.render_html(page.file.get_contents().unwrap(), render_rules),
+            PageData::Html => {
+                self.render_html(site_entry.file.get_contents().unwrap(), render_rules)
+            }
         }
     }
 
@@ -241,7 +244,7 @@ impl Renderer {
     ) -> RenderResult<String> {
         tracing::debug!(
             "rendering {:?}/{}",
-            site_entry.rel_dir(),
+            site_entry.file.rel_dir(),
             markdown.frontmatter.slug
         );
         let layout_stack = &render_rules.layouts[..];

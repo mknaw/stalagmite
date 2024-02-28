@@ -69,27 +69,19 @@ pub fn set_latest_template_modified(conn: &Connection, time: u64) -> Result<()> 
 
 pub fn restore_cached(
     conn: &Connection,
-    site_entry: SiteEntry,
-) -> anyhow::Result<Option<(Page, String)>> {
+    site_entry: &SiteEntry,
+) -> anyhow::Result<Option<(PageData, String)>> {
     let query_result = match site_entry.get_page_type() {
-        PageType::Markdown => restore_cached_markdown(conn, &site_entry)?
+        PageType::Markdown => restore_cached_markdown(conn, site_entry)?
             .map(|(md, rendered)| (PageData::Markdown(md), rendered)),
         PageType::Liquid => {
-            restore_cached_page(conn, &site_entry)?.map(|rendered| (PageData::Liquid, rendered))
+            restore_cached_page(conn, site_entry)?.map(|rendered| (PageData::Liquid, rendered))
         }
         PageType::Html => {
-            restore_cached_page(conn, &site_entry)?.map(|rendered| (PageData::Html, rendered))
+            restore_cached_page(conn, site_entry)?.map(|rendered| (PageData::Html, rendered))
         }
     };
-    Ok(query_result.map(|(data, rendered)| {
-        (
-            Page {
-                file: site_entry,
-                data,
-            },
-            rendered,
-        )
-    }))
+    Ok(query_result)
 }
 
 /// Perform a query to fetch cached data for `Markdown` construction.
@@ -101,7 +93,7 @@ fn restore_cached_markdown(
         "SELECT frontmatter, blocks, rendered FROM markdowns WHERE url=:url AND hash=:hash",
         named_params! {
             ":url": site_entry.url_path,
-            ":hash": site_entry.get_hash().unwrap(),
+            ":hash": site_entry.file.get_hash().unwrap(),
         },
         |row| {
             let frontmatter: String = row.get(0)?;
@@ -122,7 +114,7 @@ fn restore_cached_page(conn: &Connection, site_entry: &SiteEntry) -> Result<Opti
         "SELECT rendered FROM pages WHERE url=:url AND hash=:hash",
         named_params! {
             ":url": site_entry.url_path,
-            ":hash": site_entry.get_hash().unwrap(),
+            ":hash": site_entry.file.get_hash().unwrap(),
         },
         |row| {
             let rendered: String = row.get(0)?;
@@ -132,11 +124,16 @@ fn restore_cached_page(conn: &Connection, site_entry: &SiteEntry) -> Result<Opti
     .optional()
 }
 
-pub fn cache(conn: &Connection, page: &Page, rendered: &str) -> anyhow::Result<()> {
-    match &page.data {
-        PageData::Markdown(md) => cache_markdown(conn, &page.file, md, rendered),
-        PageData::Liquid => cache_page(conn, &page.file, rendered),
-        PageData::Html => cache_page(conn, &page.file, rendered),
+pub fn cache(
+    conn: &Connection,
+    page_data: PageData,
+    site_entry: &SiteEntry,
+    rendered: &str,
+) -> anyhow::Result<()> {
+    match page_data {
+        PageData::Markdown(md) => cache_markdown(conn, site_entry, &md, rendered),
+        PageData::Liquid => cache_page(conn, site_entry, rendered),
+        PageData::Html => cache_page(conn, site_entry, rendered),
     }
 }
 
@@ -160,7 +157,7 @@ fn cache_markdown(
         named_params! {
             ":url": site_entry.url_path,
             ":parent_url": site_entry.parent_url(),
-            ":hash": site_entry.get_hash().unwrap(),
+            ":hash": site_entry.file.get_hash().unwrap(),
             ":timestamp": markdown.frontmatter.timestamp.timestamp(),
             ":frontmatter": &frontmatter,
             ":blocks": &blocks,
@@ -181,7 +178,7 @@ fn cache_page(conn: &Connection, site_entry: &SiteEntry, rendered: &str) -> anyh
         ",
         named_params! {
             ":url": site_entry.url_path,
-            ":hash": site_entry.get_hash().unwrap(),
+            ":hash": site_entry.file.get_hash().unwrap(),
             ":rendered": rendered,
         },
     )?;
