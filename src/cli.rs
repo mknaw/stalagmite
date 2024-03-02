@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use stalagmite::{bootstrap_cache, generate, project, run_server, Config};
+use stalagmite::{generate, project, run_server, Config};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -72,8 +72,7 @@ async fn main() {
         // TODO propagate the actual error
         Commands::Gen { no_cache } => {
             let config = config.with_no_cache(*no_cache);
-            let pool = bootstrap_cache().unwrap();
-            generate(Arc::new(config), Arc::new(pool))
+            generate(Arc::new(config))
                 .await
                 .expect("Error generating site");
         }

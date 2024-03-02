@@ -15,7 +15,7 @@ use notify_debouncer_mini::{new_debouncer_opt, DebounceEventHandler, DebounceEve
 use tokio::sync::Notify;
 use tower_http::services::ServeDir;
 
-use crate::{cache, Config};
+use crate::Config;
 
 lazy_static! {
     static ref DEV_RELOAD_SCRIPT: Vec<u8> = {
@@ -61,9 +61,7 @@ async fn watch(config: Arc<Config>, notify: Arc<Notify>) -> notify::Result<()> {
         .watch(path, RecursiveMode::Recursive)
         .unwrap();
 
-    let pool = Arc::new(cache::bootstrap().unwrap());
     while let Some(res) = rx.recv().await {
-        let pool = pool.clone();
         let config = config.clone();
         match res {
             Ok(events) => {
@@ -79,7 +77,7 @@ async fn watch(config: Arc<Config>, notify: Arc<Notify>) -> notify::Result<()> {
                 // TODO should just use events as an input instead of collecting everything.
                 if should_regenerate {
                     tracing::info!("regenerating...");
-                    crate::generate(config, pool).await.unwrap();
+                    crate::generate(config).await.unwrap();
                     notify.notify_one();
                 }
             }

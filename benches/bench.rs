@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use criterion::{criterion_group, criterion_main, Criterion};
-use stalagmite::{bootstrap_cache, generate, Config};
+use stalagmite::{generate, Config};
 
 /// This is probably not a _great_ benchmark, but it's a start.
 fn benchmark_generate(c: &mut Criterion) {
@@ -21,8 +21,7 @@ fn benchmark_generate(c: &mut Criterion) {
             // TODO probably best to not include this within the benchmark...
             let config = Arc::new(Config::init(Some(example_project_dir.clone())).unwrap());
             // TODO should have an in-memory sqlite for testing.
-            let pool = bootstrap_cache().unwrap();
-            generate(config, Arc::new(pool))
+            generate(config)
         });
     });
 }

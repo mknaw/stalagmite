@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
+use futures::StreamExt;
 use tempfile::{tempdir, TempDir};
+use tokio_rusqlite::Connection;
 
 use crate::assets::AssetMap;
-use crate::cache::Pool;
 use crate::common::*;
 use crate::parsers::markdown;
 use crate::utils::divide_round_up;
@@ -26,19 +27,23 @@ fn get_latest_modified(templates: &[ContentFile]) -> u64 {
         .as_secs()
 }
 
-fn check_latest_modified_template(conn: &rusqlite::Connection, templates: &[ContentFile]) -> bool {
+async fn check_latest_modified_template(conn: &Connection, templates: &[ContentFile]) -> bool {
     let files_ts = get_latest_modified(templates);
-    if let Some(cache_ts) = cache::get_latest_template_modified(conn).unwrap() {
+    if let Some(cache_ts) = cache::get_latest_template_modified(conn).await.unwrap() {
         // TODO really have to roll this back if we blow up later in the generation...
         tracing::debug!("files_ts: {}, cache_ts: {}", files_ts, cache_ts);
         if cache_ts < files_ts {
-            cache::set_latest_template_modified(conn, files_ts).unwrap();
+            cache::set_latest_template_modified(conn, files_ts)
+                .await
+                .unwrap();
             true
         } else {
             false
         }
     } else {
-        cache::set_latest_template_modified(conn, files_ts).unwrap();
+        cache::set_latest_template_modified(conn, files_ts)
+            .await
+            .unwrap();
         true
     }
 }
@@ -84,23 +89,21 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     }
 }
 
-type RenderChannelItem = (SiteEntry, Arc<RenderRules>);
-type PostRenderChannelItem = (SiteEntry, PageData, String);
+type RenderChannelItem = (Arc<SiteEntry>, Arc<RenderRules>);
+type PostRenderChannelItem = (Arc<SiteEntry>, PageData, Arc<String>);
 type RenderListingChannelItem = (String, Arc<RenderRules>);
 
 struct Generator {
     config: Arc<Config>,
-    pool: Arc<Pool>,
     staging_dir: Arc<TempDir>, // TODO do an AsRef<Path> on this?
 }
 
 impl Generator {
-    pub fn new(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<Self> {
+    pub fn new(config: Arc<Config>) -> anyhow::Result<Self> {
         let staging_dir = Arc::new(tempdir()?);
 
         Ok(Self {
             config,
-            pool,
             staging_dir,
         })
     }
@@ -110,7 +113,7 @@ impl Generator {
         let templates = collect_templates(&self.config);
 
         let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
-        let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates)?;
+        let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates).await?;
         let renderer = Arc::new(Renderer::new(
             &self.config,
             asset_map,
@@ -127,10 +130,10 @@ impl Generator {
 
         // Pre-render pipeline
         let force_render = {
-            let conn = self.pool.get()?;
+            let conn = cache::new_connection().await?;
             self.config.no_cache
                 || assets_have_changed
-                || check_latest_modified_template(&conn, &templates)
+                || check_latest_modified_template(&conn, &templates).await
         };
         let pre_render_handle = {
             let post_render_tx = post_render_tx.clone();
@@ -165,14 +168,16 @@ impl Generator {
         Ok(())
     }
 
-    fn collect_assets(
+    async fn collect_assets(
         &self,
         site_nodes: &[SiteNode],
         templates: &[ContentFile],
     ) -> anyhow::Result<(AssetMap, bool)> {
-        let conn = self.pool.get()?;
+        let conn = cache::new_connection().await.unwrap();
         let (mut asset_map, assets_have_changed) =
-            assets::collect(&self.config, self.staging_dir.path(), &conn).unwrap();
+            assets::collect(&self.config, self.staging_dir.path(), &conn)
+                .await
+                .unwrap();
 
         let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
         let tailwind_cache_busted = {
@@ -211,7 +216,7 @@ impl Generator {
         render_tx: tokio::sync::mpsc::Sender<RenderChannelItem>,
         render_listing_tx: tokio::sync::mpsc::Sender<RenderListingChannelItem>,
     ) {
-        let conn = self.pool.get().unwrap();
+        let conn = cache::new_connection().await.unwrap();
         for site_node in site_nodes {
             self.route_node(
                 &conn,
@@ -230,7 +235,7 @@ impl Generator {
     /// Copy what can, and send what cannot for further processing in the pipeline.
     async fn route_node(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &Connection,
         node: SiteNode,
         force_render: bool,
         post_render_tx: &tokio::sync::mpsc::Sender<PostRenderChannelItem>,
@@ -238,12 +243,13 @@ impl Generator {
         render_listing_tx: &tokio::sync::mpsc::Sender<RenderListingChannelItem>,
     ) -> anyhow::Result<()> {
         for site_entry in node.site_entries {
+            let site_entry = Arc::new(site_entry);
             if !force_render && let Some((page_data, rendered)) =
                 // TODO this should be an async fn
-                self.try_restore_from_cache(conn, &site_entry)?
+                self.try_restore_from_cache(conn, &site_entry).await?
             {
                 post_render_tx
-                    .send((site_entry, page_data, rendered))
+                    .send((site_entry, page_data, Arc::new(rendered)))
                     .await?;
             } else {
                 render_tx
@@ -264,12 +270,12 @@ impl Generator {
         Ok(())
     }
 
-    fn try_restore_from_cache(
+    async fn try_restore_from_cache(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &Connection,
         site_entry: &SiteEntry,
     ) -> anyhow::Result<Option<(PageData, String)>> {
-        if let Some((page_data, rendered)) = cache::restore_cached(conn, site_entry)? {
+        if let Some((page_data, rendered)) = cache::restore_cached(conn, site_entry).await? {
             match copy_previously_generated(&self.config, site_entry, self.staging_dir.as_ref()) {
                 Ok(_) => {
                     tracing::info!(
@@ -317,7 +323,7 @@ impl Generator {
                     .render_page(&page_data, &site_entry, &render_rules)
                     .unwrap();
                 rayon_tx
-                    .send((site_entry, page_data, rendered))
+                    .send((site_entry, page_data, Arc::new(rendered)))
                     .unwrap_or_else(|_| unreachable!());
             });
         }
@@ -329,11 +335,12 @@ impl Generator {
     ) {
         while let Some((site_entry, page_data, rendered)) = post_render_rx.recv().await {
             let staging_path = self.staging_dir.path().to_path_buf();
-            let pool = self.pool.clone();
             tracing::debug!("writing rendered page to disk");
             // TODO really should use async rusqlite for this...
-            let conn = &pool.get().unwrap();
-            cache::cache(conn, page_data, &site_entry, &rendered).unwrap();
+            let conn = cache::new_connection().await.unwrap();
+            cache::cache(&conn, page_data, site_entry.clone(), rendered.clone())
+                .await
+                .unwrap();
             diskio::write_html(staging_path.join(&site_entry.out_path), &rendered)
                 .await
                 .unwrap();
@@ -346,7 +353,7 @@ impl Generator {
         render_rules: &R,
         group_path: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.pool.get().unwrap();
+        let conn = cache::new_connection().await?;
         // Should be OK to unwrap here.
         let page_size = render_rules
             .listing
@@ -356,39 +363,35 @@ impl Generator {
             .unwrap_or(DEFAULT_LISTING_PAGE_SIZE);
         // TODO need to get the right pagination count.
         // TODO also should be able to restore cached renders from the db!
-        let page_count =
-            divide_round_up(cache::get_page_group_count(&conn, group_path)?, page_size);
-        let page_info_iterator =
-            cache::get_markdown_info_listing_iterator(&conn, group_path, page_size);
-        for (index, group) in page_info_iterator.enumerate() {
-            match group {
-                Ok(markdowns) => {
-                    // TODO need to get the page count (sqlite also).
-                    let rendered = renderer.render_listing_page(
-                        &markdowns,
-                        render_rules,
-                        (index.try_into().unwrap(), page_count),
-                    )?;
-                    let out_path = self
-                        .staging_dir
-                        .path()
-                        .join(group_path)
-                        .join(format!("{}/index.html", index));
-                    fs::create_dir_all(out_path.parent().unwrap())?;
-                    diskio::write_html_sync(out_path, &rendered)?;
-                }
-                Err(e) => {
-                    return Err(anyhow!(e));
-                }
-            }
+        let page_count = divide_round_up(
+            cache::get_page_group_count(&conn, group_path).await?,
+            page_size,
+        );
+        let stream = cache::markdown_stream(conn, group_path, page_size);
+        futures::pin_mut!(stream);
+        let index = 0; // TODO enumerate
+        while let Some(group) = stream.next().await {
+            // TODO need to get the page count (sqlite also).
+            let rendered = renderer.render_listing_page(
+                &group,
+                render_rules,
+                (index.try_into().unwrap(), page_count),
+            )?;
+            let out_path = self
+                .staging_dir
+                .path()
+                .join(group_path)
+                .join(format!("{}/index.html", index));
+            fs::create_dir_all(out_path.parent().unwrap())?;
+            diskio::write_html_sync(out_path, &rendered)?;
         }
         Ok(())
     }
 }
 
 /// Generate the site.
-pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()> {
-    let generator = Generator::new(config, pool)?;
+pub async fn generate(config: Arc<Config>) -> anyhow::Result<()> {
+    let generator = Generator::new(config)?;
     generator.generate().await?;
     Ok(())
 }

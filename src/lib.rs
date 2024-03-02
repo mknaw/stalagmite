@@ -30,7 +30,6 @@ pub mod project;
 mod renderer;
 mod utils;
 
-pub use cache::bootstrap as bootstrap_cache;
 pub use common::Markdown;
 pub use config::Config;
 pub use generator::generate;

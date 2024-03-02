@@ -11,6 +11,7 @@ use railwind::warning::Position;
 use railwind::ParsedClass;
 use regex::Regex;
 use thiserror::Error;
+use tokio_rusqlite::Connection;
 
 use crate::{cache, diskio, utils, Config};
 
@@ -142,10 +143,10 @@ pub fn render_css<P: AsRef<Path>>(
     Ok(filename.to_str().unwrap().to_string())
 }
 
-pub fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
+pub async fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
     config: &C,
     staging_dir: P,
-    conn: &rusqlite::Connection,
+    conn: &Connection,
 ) -> anyhow::Result<(AssetMap, bool)> {
     let mut static_asset_map = HashMap::new();
     let assets_dir = config.assets_dir();
@@ -162,7 +163,7 @@ pub fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
             .with_file_name(&name);
         fs::create_dir_all(out.parent().unwrap())?;
         fs::copy(&path_buf, out)?;
-        changed |= cache::check_asset_changed(conn, &alias, &hash)?;
+        changed |= cache::check_asset_changed(conn, &alias, &hash).await?;
         static_asset_map.insert(alias, name.to_string_lossy().to_string());
     }
     Ok((static_asset_map, changed))
