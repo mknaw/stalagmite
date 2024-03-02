@@ -1,15 +1,13 @@
+use std::fs;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use std::{fs, thread};
 
 use anyhow::anyhow;
-use rayon::prelude::*;
-use tempfile::tempdir;
-use tokio::task::JoinSet;
+use tempfile::{tempdir, TempDir};
 
+use crate::assets::AssetMap;
 use crate::cache::Pool;
 use crate::common::*;
 use crate::parsers::markdown;
@@ -86,215 +84,479 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     }
 }
 
-fn generate_listing<P: AsRef<Path>, R: Deref<Target = RenderRules>>(
-    conn: &rusqlite::Connection,
-    renderer: &Renderer,
-    render_rules: &R,
-    staging_dir: P,
-    group_path: &str,
-) -> anyhow::Result<()> {
-    // Should be OK to unwrap here.
-    let page_size = render_rules
-        .listing
-        .as_ref()
-        .unwrap()
-        .page_size
-        .unwrap_or(DEFAULT_LISTING_PAGE_SIZE);
-    // TODO need to get the right pagination count.
-    // TODO also should be able to restore cached renders from the db!
-    let page_count = divide_round_up(cache::get_page_group_count(conn, group_path)?, page_size);
-    let page_info_iterator = cache::get_markdown_info_listing_iterator(conn, group_path, page_size);
-    for (index, group) in page_info_iterator.enumerate() {
-        match group {
-            Ok(markdowns) => {
-                // TODO need to get the page count (sqlite also).
-                let rendered = renderer.render_listing_page(
-                    &markdowns,
-                    render_rules,
-                    (index.try_into().unwrap(), page_count),
-                )?;
-                let out_path = staging_dir
-                    .as_ref()
-                    .join(group_path)
-                    .join(format!("{}/index.html", index));
-                fs::create_dir_all(out_path.parent().unwrap())?;
-                diskio::write_html_sync(out_path, &rendered)?;
-            }
-            Err(e) => {
-                return Err(anyhow!(e));
-            }
-        }
-    }
-    Ok(())
+type RenderChannelItem = (SiteEntry, Arc<RenderRules>);
+type PostRenderChannelItem = (SiteEntry, PageData, String);
+type RenderListingChannelItem = (String, Arc<RenderRules>);
+
+struct Generator {
+    config: Arc<Config>,
+    pool: Arc<Pool>,
+    staging_dir: Arc<TempDir>, // TODO do an AsRef<Path> on this?
 }
 
-/// Generate the site.
-pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()> {
-    // TODO probably should be one big tx so idk about the pool...
-    // Or maybe copy the whole DB?
-    let conn = pool.get()?;
+impl Generator {
+    pub fn new(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<Self> {
+        let staging_dir = Arc::new(tempdir()?);
 
-    let site_nodes = diskio::collect_site_nodes(config.clone());
+        Ok(Self {
+            config,
+            pool,
+            staging_dir,
+        })
+    }
 
-    let staging_dir = tempdir()?;
+    async fn generate(&self) -> anyhow::Result<()> {
+        let site_nodes = diskio::collect_site_nodes(self.config.clone());
+        let templates = collect_templates(&self.config);
 
-    let templates = collect_templates(&config);
+        let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
+        let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates)?;
+        let renderer = Arc::new(Renderer::new(
+            &self.config,
+            asset_map,
+            tailwind_alias,
+            &templates,
+        ));
 
-    let (mut asset_map, assets_have_changed) =
-        assets::collect(&config, staging_dir.path(), &conn).unwrap();
+        // TODO where will I get these numbers from... what are good numbers?
+        let (render_tx, render_rx) = tokio::sync::mpsc::channel::<RenderChannelItem>(10);
+        let (post_render_tx, post_render_rx) =
+            tokio::sync::mpsc::channel::<PostRenderChannelItem>(10);
+        let (render_listing_tx, mut render_listing_rx) =
+            tokio::sync::mpsc::channel::<RenderListingChannelItem>(10);
 
-    let tailwind_alias = "tw.css".to_string();
-    let tailwind_cache_busted = {
-        let mut class_collector = assets::ClassCollector::new();
-        templates.iter().for_each(|pf| {
-            assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
-        });
+        // Pre-render pipeline
+        let force_render = {
+            let conn = self.pool.get()?;
+            self.config.no_cache
+                || assets_have_changed
+                || check_latest_modified_template(&conn, &templates)
+        };
+        let pre_render_handle = {
+            let post_render_tx = post_render_tx.clone();
+            self.run_pre_render_pipeline(
+                site_nodes,
+                force_render,
+                post_render_tx,
+                render_tx,
+                render_listing_tx,
+            )
+        };
 
-        site_nodes
-            .iter()
-            .flat_map(|node| {
-                node.site_entries
-                    .iter()
-                    .filter(|se| matches!(se.get_page_type(), PageType::Html))
-            })
-            .for_each(|se| {
-                assets::collect_classes(se.file.get_contents().unwrap(), &mut class_collector)
+        // Render pipeline
+        let render_handle = self.run_render_pipeline(renderer.clone(), render_rx, post_render_tx);
+
+        // Post-render pipeline
+        let post_render_handle = self.run_post_render_pipeline(post_render_rx);
+
+        tokio::join!(pre_render_handle, render_handle, post_render_handle,);
+
+        while let Some((dir, render_rules)) = render_listing_rx.recv().await {
+            self.generate_listing(&renderer, &render_rules, &dir)
+                .await
+                .unwrap();
+        }
+
+        // Replace the old output directory with the new one.
+        std::fs::remove_dir_all(self.config.out_dir()).unwrap();
+        std::fs::rename(self.staging_dir.path(), self.config.out_dir()).unwrap();
+        tracing::info!("static site generated!");
+
+        Ok(())
+    }
+
+    fn collect_assets(
+        &self,
+        site_nodes: &[SiteNode],
+        templates: &[ContentFile],
+    ) -> anyhow::Result<(AssetMap, bool)> {
+        let conn = self.pool.get()?;
+        let (mut asset_map, assets_have_changed) =
+            assets::collect(&self.config, self.staging_dir.path(), &conn).unwrap();
+
+        let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
+        let tailwind_cache_busted = {
+            let mut class_collector = assets::ClassCollector::new();
+            templates.iter().for_each(|pf| {
+                assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
             });
 
-        assets::render_css(&tailwind_alias, class_collector, true, &staging_dir)?
-    };
-    asset_map.insert(tailwind_alias.to_string(), tailwind_cache_busted);
-
-    let renderer = Arc::new(Renderer::new(
-        &config,
-        asset_map,
-        "tw.css".to_string(),
-        &templates,
-    ));
-
-    tracing::debug!("collected {} site nodes", site_nodes.len());
-
-    let (render_tx, render_rx) = channel::<(SiteEntry, Arc<RenderRules>)>();
-    let (post_render_tx, post_render_rx) = channel::<(SiteEntry, PageData, String)>();
-
-    let (render_listing_tx, render_listing_rx) = channel::<(String, Arc<RenderRules>)>();
-
-    let staging_dir = Arc::new(staging_dir.path().to_path_buf());
-    {
-        let config = config.clone();
-        let post_render_tx = post_render_tx.clone();
-        let pool = pool.clone();
-        let staging_dir = staging_dir.clone();
-
-        thread::spawn(move || {
-            let conn = &pool.get().unwrap();
-            // Force rendering anew if templates have changed or the underlying assets.
-            // TODO Could do this quite a bit smartly:
-            // - for the assets, just leave the non cache-busted name for a second pass
-            // - the templates would be a bit trickier, but should be able to determine which
-            //   template needed for which render, and skip there.
-            let force_render = config.no_cache
-                || assets_have_changed
-                || check_latest_modified_template(conn, &templates);
             site_nodes
-                .into_iter()
-                .try_for_each(|node| -> Result<(), anyhow::Error> {
-                    let result = node.site_entries.into_iter().try_for_each(
-                        |site_entry| -> Result<(), anyhow::Error> {
-                            // If `liquids_were_modified`, we know we have to rerender anyway.
-                            if !force_render {
-                                if let Some((page_data, rendered)) =
-                                    cache::restore_cached(conn, &site_entry)?
-                                {
-                                    match copy_previously_generated(
-                                        &config,
-                                        &site_entry,
-                                        staging_dir.as_path(),
-                                    ) {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                "copied previously generated file for {:?}",
-                                                site_entry.out_path
-                                            );
-                                            post_render_tx
-                                                .send((site_entry, page_data, rendered))?;
-                                            return Ok(());
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "error copying previously generated file: {:?}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            render_tx
-                                .send((site_entry, node.render_rules.clone()))
-                                .map_err(|e| anyhow!(e))
-                        },
+                .iter()
+                .flat_map(|node| {
+                    node.site_entries
+                        .iter()
+                        .filter(|se| matches!(se.get_page_type(), PageType::Html))
+                })
+                .for_each(|se| {
+                    assets::collect_classes(se.file.get_contents().unwrap(), &mut class_collector)
+                });
+
+            assets::render_css(
+                &tailwind_alias,
+                class_collector,
+                true,
+                self.staging_dir.path(),
+            )?
+        };
+        asset_map.insert(tailwind_alias.clone(), tailwind_cache_busted);
+        Ok((asset_map, assets_have_changed))
+    }
+
+    async fn run_pre_render_pipeline(
+        &self,
+        site_nodes: Vec<SiteNode>,
+        force_render: bool,
+        post_render_tx: tokio::sync::mpsc::Sender<PostRenderChannelItem>,
+        render_tx: tokio::sync::mpsc::Sender<RenderChannelItem>,
+        render_listing_tx: tokio::sync::mpsc::Sender<RenderListingChannelItem>,
+    ) {
+        let conn = self.pool.get().unwrap();
+        for site_node in site_nodes {
+            self.route_node(
+                &conn,
+                site_node,
+                force_render,
+                &post_render_tx,
+                &render_tx,
+                &render_listing_tx,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    /// See what of the `node` can be restored from the cache.
+    /// Copy what can, and send what cannot for further processing in the pipeline.
+    async fn route_node(
+        &self,
+        conn: &rusqlite::Connection,
+        node: SiteNode,
+        force_render: bool,
+        post_render_tx: &tokio::sync::mpsc::Sender<PostRenderChannelItem>,
+        render_tx: &tokio::sync::mpsc::Sender<RenderChannelItem>,
+        render_listing_tx: &tokio::sync::mpsc::Sender<RenderListingChannelItem>,
+    ) -> anyhow::Result<()> {
+        for site_entry in node.site_entries {
+            if !force_render && let Some((page_data, rendered)) =
+                // TODO this should be an async fn
+                self.try_restore_from_cache(conn, &site_entry)?
+            {
+                post_render_tx
+                    .send((site_entry, page_data, rendered))
+                    .await?;
+            } else {
+                render_tx
+                    .send((site_entry, node.render_rules.clone()))
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+            }
+        }
+
+        if node.render_rules.should_render_listing() {
+            render_listing_tx
+                .send((
+                    node.dir.as_os_str().to_str().unwrap().to_string(),
+                    node.render_rules.clone(),
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn try_restore_from_cache(
+        &self,
+        conn: &rusqlite::Connection,
+        site_entry: &SiteEntry,
+    ) -> anyhow::Result<Option<(PageData, String)>> {
+        if let Some((page_data, rendered)) = cache::restore_cached(conn, site_entry)? {
+            match copy_previously_generated(&self.config, site_entry, self.staging_dir.as_ref()) {
+                Ok(_) => {
+                    tracing::info!(
+                        "copied previously generated file for {:?}",
+                        site_entry.out_path
                     );
-                    if result.is_ok() && node.render_rules.should_render_listing() {
-                        render_listing_tx
-                            .send((
-                                node.dir.as_os_str().to_str().unwrap().to_string(),
-                                node.render_rules.clone(),
-                            ))
-                            .unwrap();
-                    }
-                    result
-                })
-                .unwrap();
-        });
+
+                    return Ok(Some((page_data, rendered)));
+                }
+                Err(e) => {
+                    tracing::warn!("error copying previously generated file: {:?}", e);
+                }
+            }
+        }
+        Ok(None)
     }
 
-    {
-        let renderer = renderer.clone();
-        thread::spawn(move || {
-            render_rx
-                .into_iter()
-                .par_bridge()
-                .try_for_each(|(site_entry, render_rules)| -> Result<(), anyhow::Error> {
-                    tracing::debug!("rendering page: {:?}", site_entry.file.rel_path);
-                    let page_data = parse_page_data(&site_entry).unwrap();
-                    let rendered = renderer.render_page(&page_data, &site_entry, &render_rules)?;
-                    post_render_tx
-                        .send((site_entry, page_data, rendered))
-                        .unwrap();
-                    Ok(())
-                })
-                .unwrap();
+    async fn run_render_pipeline(
+        &self,
+        renderer: Arc<Renderer>,
+        mut render_rx: tokio::sync::mpsc::Receiver<RenderChannelItem>,
+        post_render_tx: tokio::sync::mpsc::Sender<PostRenderChannelItem>,
+    ) {
+        // Must use an unbounded channel to synchronously send from the rayon threads.
+        // Backpressure _should_ be handled by the `render_rx` channel.
+        let (rayon_tx, mut rayon_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            while let Some((site_entry, page_data, rendered)) = rayon_rx.recv().await {
+                post_render_tx
+                    .send((site_entry, page_data, rendered))
+                    .await
+                    .unwrap();
+            }
         });
+
+        while let Some((site_entry, render_rules)) = render_rx.recv().await {
+            let rayon_tx = rayon_tx.clone();
+            let renderer = renderer.clone();
+            rayon::spawn(move || {
+                tracing::debug!("rendering page: {:?}", site_entry.file.rel_path);
+                // TODO err handle
+                let page_data = parse_page_data(&site_entry).unwrap();
+                let rendered = renderer
+                    .render_page(&page_data, &site_entry, &render_rules)
+                    .unwrap();
+                rayon_tx
+                    .send((site_entry, page_data, rendered))
+                    .unwrap_or_else(|_| unreachable!());
+            });
+        }
     }
 
-    // TODO in fact I think there can be other race conditions, for the other thread.
-    // so maybe need something better than this.
-    let mut join_set = JoinSet::new();
-
-    for (site_entry, page_data, rendered) in post_render_rx.iter() {
-        let staging_path = staging_dir.clone();
-        let pool = pool.clone();
-        // TODO probably not even worth doing async... probably better to just thread it...
-        join_set.spawn(async move {
+    async fn run_post_render_pipeline(
+        &self,
+        mut post_render_rx: tokio::sync::mpsc::Receiver<PostRenderChannelItem>,
+    ) {
+        while let Some((site_entry, page_data, rendered)) = post_render_rx.recv().await {
+            let staging_path = self.staging_dir.path().to_path_buf();
+            let pool = self.pool.clone();
             tracing::debug!("writing rendered page to disk");
             // TODO really should use async rusqlite for this...
             let conn = &pool.get().unwrap();
             cache::cache(conn, page_data, &site_entry, &rendered).unwrap();
-            diskio::write_html(staging_path.join(&site_entry.out_path), &rendered).await?;
-            Ok::<(), anyhow::Error>(())
-        });
+            diskio::write_html(staging_path.join(&site_entry.out_path), &rendered)
+                .await
+                .unwrap();
+        }
     }
 
-    while (join_set.join_next().await).is_some() {}
-
-    for (dir, render_rules) in render_listing_rx.iter() {
-        generate_listing(&conn, &renderer, &render_rules, staging_dir.as_path(), &dir).unwrap();
+    async fn generate_listing<R: Deref<Target = RenderRules>>(
+        &self,
+        renderer: &Renderer,
+        render_rules: &R,
+        group_path: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get().unwrap();
+        // Should be OK to unwrap here.
+        let page_size = render_rules
+            .listing
+            .as_ref()
+            .unwrap()
+            .page_size
+            .unwrap_or(DEFAULT_LISTING_PAGE_SIZE);
+        // TODO need to get the right pagination count.
+        // TODO also should be able to restore cached renders from the db!
+        let page_count =
+            divide_round_up(cache::get_page_group_count(&conn, group_path)?, page_size);
+        let page_info_iterator =
+            cache::get_markdown_info_listing_iterator(&conn, group_path, page_size);
+        for (index, group) in page_info_iterator.enumerate() {
+            match group {
+                Ok(markdowns) => {
+                    // TODO need to get the page count (sqlite also).
+                    let rendered = renderer.render_listing_page(
+                        &markdowns,
+                        render_rules,
+                        (index.try_into().unwrap(), page_count),
+                    )?;
+                    let out_path = self
+                        .staging_dir
+                        .path()
+                        .join(group_path)
+                        .join(format!("{}/index.html", index));
+                    fs::create_dir_all(out_path.parent().unwrap())?;
+                    diskio::write_html_sync(out_path, &rendered)?;
+                }
+                Err(e) => {
+                    return Err(anyhow!(e));
+                }
+            }
+        }
+        Ok(())
     }
+}
 
-    // Replace the old output directory with the new one.
-    std::fs::remove_dir_all(config.out_dir()).unwrap();
-    std::fs::rename(staging_dir.as_path(), config.out_dir()).unwrap();
-    tracing::info!("static site generated!");
-
+/// Generate the site.
+pub async fn generate(config: Arc<Config>, pool: Arc<Pool>) -> anyhow::Result<()> {
+    let generator = Generator::new(config, pool)?;
+    generator.generate().await?;
     Ok(())
+    // TODO probably should be one big tx so idk about the pool...
+    // Or maybe copy the whole DB?
+    // let conn = pool.get()?;
+    //
+    // // You could probably get cuter with this and stream while walking, but it seems like these may
+    // // be needed for a site map eventually. I guess I could create that from the cache DB too.
+    // let site_nodes = diskio::collect_site_nodes(config.clone());
+    //
+    // let staging_dir = tempdir()?;
+    //
+    // let templates = collect_templates(&config);
+    //
+    // let (mut asset_map, assets_have_changed) =
+    //     assets::collect(&config, staging_dir.path(), &conn).unwrap();
+    //
+    // let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
+    // let tailwind_cache_busted = {
+    //     let mut class_collector = assets::ClassCollector::new();
+    //     templates.iter().for_each(|pf| {
+    //         assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
+    //     });
+    //
+    //     site_nodes
+    //         .iter()
+    //         .flat_map(|node| {
+    //             node.site_entries
+    //                 .iter()
+    //                 .filter(|se| matches!(se.get_page_type(), PageType::Html))
+    //         })
+    //         .for_each(|se| {
+    //             assets::collect_classes(se.file.get_contents().unwrap(), &mut class_collector)
+    //         });
+    //
+    //     assets::render_css(&tailwind_alias, class_collector, true, &staging_dir)?
+    // };
+    // asset_map.insert(tailwind_alias.clone(), tailwind_cache_busted);
+    //
+    // let renderer = Arc::new(Renderer::new(
+    //     &config,
+    //     asset_map,
+    //     tailwind_alias,
+    //     &templates,
+    // ));
+    //
+    // tracing::debug!("collected {} site nodes", site_nodes.len());
+    //
+    // let (render_tx, render_rx) = channel::<(SiteEntry, Arc<RenderRules>)>();
+    // let (post_render_tx, post_render_rx) = channel::<(SiteEntry, PageData, String)>();
+    // let (render_listing_tx, render_listing_rx) = channel::<(String, Arc<RenderRules>)>();
+    //
+    // let staging_dir = Arc::new(staging_dir.path().to_path_buf());
+    // {
+    //     let config = config.clone();
+    //     let post_render_tx = post_render_tx.clone();
+    //     let pool = pool.clone();
+    //     let staging_dir = staging_dir.clone();
+    //
+    //     thread::spawn(move || {
+    //         let conn = &pool.get().unwrap();
+    //         // Force rendering anew if templates have changed or the underlying assets.
+    //         // TODO Could do this quite a bit smartly:
+    //         // - for the assets, just leave the non cache-busted name for a second pass
+    //         // - the templates would be a bit trickier, but should be able to determine which
+    //         //   template needed for which render, and skip there.
+    //         let force_render = config.no_cache
+    //             || assets_have_changed
+    //             || check_latest_modified_template(conn, &templates);
+    //         site_nodes
+    //             .into_iter()
+    //             .try_for_each(|node| -> Result<(), anyhow::Error> {
+    //                 let result = node.site_entries.into_iter().try_for_each(
+    //                     |site_entry| -> Result<(), anyhow::Error> {
+    //                         // If `liquids_were_modified`, we know we have to rerender anyway.
+    //                         if !force_render {
+    //                             if let Some((page_data, rendered)) =
+    //                                 cache::restore_cached(conn, &site_entry)?
+    //                             {
+    //                                 match copy_previously_generated(
+    //                                     &config,
+    //                                     &site_entry,
+    //                                     staging_dir.as_path(),
+    //                                 ) {
+    //                                     Ok(_) => {
+    //                                         tracing::info!(
+    //                                             "copied previously generated file for {:?}",
+    //                                             site_entry.out_path
+    //                                         );
+    //                                         post_render_tx
+    //                                             .send((site_entry, page_data, rendered))?;
+    //                                         return Ok(());
+    //                                     }
+    //                                     Err(e) => {
+    //                                         tracing::warn!(
+    //                                             "error copying previously generated file: {:?}",
+    //                                             e
+    //                                         );
+    //                                     }
+    //                                 }
+    //                             }
+    //                         }
+    //                         render_tx
+    //                             .send((site_entry, node.render_rules.clone()))
+    //                             .map_err(|e| anyhow!(e))
+    //                     },
+    //                 );
+    //                 if result.is_ok() && node.render_rules.should_render_listing() {
+    //                     render_listing_tx
+    //                         .send((
+    //                             node.dir.as_os_str().to_str().unwrap().to_string(),
+    //                             node.render_rules.clone(),
+    //                         ))
+    //                         .unwrap();
+    //                 }
+    //                 result
+    //             })
+    //             .unwrap();
+    //     });
+    // }
+    //
+    // {
+    //     let renderer = renderer.clone();
+    //     thread::spawn(move || {
+    //         render_rx
+    //             .into_iter()
+    //             .par_bridge()
+    //             .try_for_each(|(site_entry, render_rules)| -> Result<(), anyhow::Error> {
+    //                 tracing::debug!("rendering page: {:?}", site_entry.file.rel_path);
+    //                 let page_data = parse_page_data(&site_entry).unwrap();
+    //                 let rendered = renderer.render_page(&page_data, &site_entry, &render_rules)?;
+    //                 post_render_tx
+    //                     .send((site_entry, page_data, rendered))
+    //                     .unwrap();
+    //                 Ok(())
+    //             })
+    //             .unwrap();
+    //     });
+    // }
+    //
+    // // TODO in fact I think there can be other race conditions, for the other thread.
+    // // so maybe need something better than this.
+    // let mut join_set = JoinSet::new();
+    //
+    // for (site_entry, page_data, rendered) in post_render_rx.iter() {
+    //     let staging_path = staging_dir.clone();
+    //     let pool = pool.clone();
+    //     // TODO probably not even worth doing async... probably better to just thread it...
+    //     join_set.spawn(async move {
+    //         tracing::debug!("writing rendered page to disk");
+    //         // TODO really should use async rusqlite for this...
+    //         let conn = &pool.get().unwrap();
+    //         cache::cache(conn, page_data, &site_entry, &rendered).unwrap();
+    //         diskio::write_html(staging_path.join(&site_entry.out_path), &rendered).await?;
+    //         Ok::<(), anyhow::Error>(())
+    //     });
+    // }
+    //
+    // while (join_set.join_next().await).is_some() {}
+    //
+    // for (dir, render_rules) in render_listing_rx.iter() {
+    //     generate_listing(&conn, &renderer, &render_rules, staging_dir.as_path(), &dir).unwrap();
+    // }
+    //
+    // // Replace the old output directory with the new one.
+    // std::fs::remove_dir_all(config.out_dir()).unwrap();
+    // std::fs::rename(staging_dir.as_path(), config.out_dir()).unwrap();
+    // tracing::info!("static site generated!");
+    //
+    // Ok(())
 }

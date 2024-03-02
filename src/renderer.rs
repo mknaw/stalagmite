@@ -130,6 +130,7 @@ impl Renderer {
     pub fn new(
         config: &Config,
         static_asset_map: HashMap<String, String>,
+        // TODO why was this needed anyway?
         css_file_name: String,
         partials: &[ContentFile],
     ) -> Self {
