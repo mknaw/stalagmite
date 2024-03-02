@@ -128,7 +128,8 @@ where
     let notify = Arc::new(Notify::new());
     {
         let notify = notify.clone();
-        tokio::spawn(async move {
+        // TODO see if we can get `spawn` again...
+        tokio::task::spawn_local(async move {
             watch(config, notify).await.unwrap();
         });
     }

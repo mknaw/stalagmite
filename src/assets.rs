@@ -25,6 +25,10 @@ lazy_static! {
         Regex::new(r#"(?:class|className)=(?:["]\W+\s*(?:\w+)\()?["]([^"]+)["]"#).unwrap();
 }
 
+pub const TAILWIND_FILENAME: &str = "tw.css";
+
+pub type AssetMap = HashMap<String, String>;
+
 #[derive(Error, Debug)]
 pub enum StyleError {}
 
@@ -142,7 +146,7 @@ pub fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
     config: &C,
     staging_dir: P,
     conn: &rusqlite::Connection,
-) -> anyhow::Result<(HashMap<String, String>, bool)> {
+) -> anyhow::Result<(AssetMap, bool)> {
     let mut static_asset_map = HashMap::new();
     let assets_dir = config.assets_dir();
     let mut changed = false;
