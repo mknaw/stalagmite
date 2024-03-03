@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use tempfile::{tempdir, TempDir};
 use tokio_rusqlite::Connection;
@@ -15,20 +16,29 @@ use crate::parsers::markdown;
 use crate::utils::divide_round_up;
 use crate::{assets, cache, diskio, Config, Renderer};
 
-fn get_latest_modified(templates: &[ContentFile]) -> u64 {
-    templates
-        .iter()
-        .map(|p| p.abs_path.metadata().unwrap().modified().unwrap())
-        .max()
-        .unwrap() // Assume there must be _some_ templates
-        // TODO could probably assert that earlier though
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+async fn get_latest_modified(templates: &[ContentFile]) -> Option<u64> {
+    let mut futures = FuturesUnordered::new();
+    for template in templates {
+        futures.push(tokio::fs::metadata(&template.abs_path));
+    }
+
+    let mut max: Option<u64> = None;
+    while let Some(Ok(metadata)) = futures.next().await {
+        let modified = metadata
+            .modified()
+            .expect("Failed to get modified time")
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+
+        max = Some(max.map_or(modified, |m| m.max(modified)));
+    }
+
+    max
 }
 
 async fn check_latest_modified_template(conn: &Connection, templates: &[ContentFile]) -> bool {
-    let files_ts = get_latest_modified(templates);
+    let files_ts = get_latest_modified(templates).await.unwrap();
     if let Some(cache_ts) = cache::get_latest_template_modified(conn).await.unwrap() {
         // TODO really have to roll this back if we blow up later in the generation...
         tracing::debug!("files_ts: {}, cache_ts: {}", files_ts, cache_ts);
