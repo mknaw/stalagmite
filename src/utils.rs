@@ -10,8 +10,12 @@ pub fn slugify(s: &str) -> String {
 }
 
 /// Hash the given `bytes`.
-pub fn hash(bytes: &[u8]) -> String {
-    format!("{:016x}", seahash::hash(bytes))
+pub fn hash(bytes: &[u8]) -> u64 {
+    seahash::hash(bytes)
+}
+
+pub fn stringify_hash(hash: u64) -> String {
+    format!("{:016x}", hash)
 }
 
 pub fn divide_round_up(dividend: u8, divisor: u8) -> u8 {

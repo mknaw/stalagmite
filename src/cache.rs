@@ -5,6 +5,7 @@ use futures::Stream;
 use tokio_rusqlite::*;
 
 use crate::common::*;
+use crate::utils;
 
 const DB_PATH: &str = "./db.sqlite";
 
@@ -16,6 +17,15 @@ mod embedded {
 // TODO _could_ impl Deadpool for tokio_rusqlite, but really.. it's probably overkill...
 pub async fn new_connection() -> tokio_rusqlite::Result<Connection> {
     Connection::open(DB_PATH).await
+}
+
+pub async fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    conn.call(|conn| {
+        embedded::migrations::runner().run(&mut *conn).unwrap();
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
 // TODO also would be good to purge the old ones.
@@ -101,7 +111,7 @@ async fn restore_cached_markdown(
     site_entry: &SiteEntry,
 ) -> Result<Option<(Markdown, String)>> {
     let url_path = site_entry.url_path.clone();
-    let hash = site_entry.file.get_hash().unwrap().to_string();
+    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.query_row(
             "SELECT frontmatter, blocks, rendered FROM markdowns WHERE url=:url AND hash=:hash",
@@ -128,7 +138,7 @@ async fn restore_cached_markdown(
 
 async fn restore_cached_page(conn: &Connection, site_entry: &SiteEntry) -> Result<Option<String>> {
     let url_path = site_entry.url_path.clone();
-    let hash = site_entry.file.get_hash().unwrap().to_string();
+    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.query_row(
             "SELECT rendered FROM pages WHERE url=:url AND hash=:hash",
@@ -169,6 +179,7 @@ async fn cache_markdown(
     let frontmatter = serde_yaml::to_string(&markdown.frontmatter).unwrap();
     let blocks = serde_yaml::to_string(&markdown.blocks).unwrap();
     let timestamp = markdown.frontmatter.timestamp.timestamp();
+    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.execute(
             "INSERT INTO markdowns (url, parent_url, hash, timestamp, frontmatter, blocks, rendered)
@@ -182,7 +193,7 @@ async fn cache_markdown(
             named_params! {
                 ":url": site_entry.url_path,
                 ":parent_url": site_entry.parent_url(),
-                ":hash": site_entry.file.get_hash().unwrap(),
+                ":hash": hash,
                 ":timestamp": timestamp,
                 ":frontmatter": &frontmatter,
                 ":blocks": &blocks,
@@ -200,6 +211,7 @@ async fn cache_page(
     site_entry: Arc<SiteEntry>,
     rendered: Arc<String>,
 ) -> anyhow::Result<()> {
+    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.execute(
             "INSERT INTO pages (url, hash, rendered)
@@ -211,7 +223,7 @@ async fn cache_page(
             ",
             named_params! {
                 ":url": site_entry.url_path,
-                ":hash": site_entry.file.get_hash().unwrap(),
+                ":hash": hash,
                 ":rendered": rendered,
             },
         )
@@ -234,88 +246,6 @@ pub async fn get_page_group_count(conn: &Connection, parent_url: &str) -> anyhow
     .await
     .map_err(Into::into)
 }
-
-// Iterator that encapsulates SQLite query execution with offset and limit.
-// pub struct MarkdownIterator<'a> {
-//     conn: &'a Connection,
-//     limit: u8,
-//     query: &'a str,
-//     parent_url: &'a str,
-//     offset: u8,
-// }
-//
-// impl<'a> MarkdownIterator<'a> {
-//     async fn new(
-//         conn: &'a Connection,
-//         parent_url: &'a str,
-//         query: &'a str,
-//         limit: u8,
-//     ) -> MarkdownIterator<'a> {
-//         MarkdownIterator {
-//             conn,
-//             parent_url,
-//             limit,
-//             query,
-//             offset: 0,
-//         }
-//     }
-// }
-//
-// impl<'a> Iterator for MarkdownIterator<'a> {
-//     type Item = Result<Vec<(Markdown, String)>>;
-//
-//     fn next(&mut self) -> Option<Self::Item> {
-//         let rows = self
-//             .conn
-//             .call(|conn| {
-//                 let statement = conn.prepare(self.query)?;
-//                 statement.query_map(params![self.parent_url, self.limit, self.offset], |row| {
-//                     let frontmatter: String = row.get(0)?;
-//                     let blocks: String = row.get(1)?;
-//                     let markdown = Markdown {
-//                         frontmatter: serde_yaml::from_str(&frontmatter).unwrap(),
-//                         blocks: serde_yaml::from_str(&blocks).unwrap(),
-//                     };
-//                     let url = row.get(2)?;
-//                     Ok((markdown, url))
-//                 })?
-//             })
-//             .await?;
-//
-//         self.offset += self.limit;
-//
-//         match rows {
-//             Ok(rows) => {
-//                 let markdowns = rows.collect::<Result<Vec<(Markdown, String)>>>();
-//                 if let Ok(mds) = &markdowns {
-//                     if mds.is_empty() {
-//                         return None;
-//                     }
-//                 }
-//                 Some(markdowns)
-//             }
-//             Err(e) => Some(Err(e)),
-//         }
-//     }
-// }
-//
-// pub async fn get_markdown_info_listing_iterator<'a>(
-//     conn: &'a Connection,
-//     parent_url: &'a str,
-//     limit: u8,
-// ) -> MarkdownIterator<'a> {
-//     MarkdownIterator::new(
-//         conn,
-//         parent_url,
-//         "SELECT frontmatter, blocks, url
-//         FROM markdowns
-//         WHERE parent_url = ?
-//         ORDER BY timestamp
-//         LIMIT ?
-//         OFFSET ?",
-//         limit,
-//     )
-// }
 
 struct MarkdownIteratorState<'a> {
     conn: Connection, // Consider Arc<Mutex<Connection>> for shared access
