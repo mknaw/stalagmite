@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
@@ -32,20 +32,24 @@ pub struct ContentFile {
     // Path relative to the pages directory.
     pub rel_path: Utf8PathBuf,
     // File contents.
-    pub contents: OnceLock<String>,
+    pub contents: String,
     // Cached content hash.
-    pub hash: OnceLock<String>,
+    pub hash: u64,
 }
 
 impl ContentFile {
-    pub fn new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> Self {
+    pub async fn new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
         let rel_path = abs_path.strip_prefix(pages_dir).unwrap().to_owned();
-        Self {
+        let contents = tokio::fs::read(&abs_path).await;
+        let hash = utils::hash(contents.as_ref().unwrap());
+        Ok(Self {
             abs_path,
             rel_path,
-            contents: OnceLock::new(),
-            hash: OnceLock::new(),
-        }
+            contents: contents
+                .map(|c| std::str::from_utf8(&c).unwrap().to_string())
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+            hash,
+        })
     }
 
     /// Returns the absolute path of the directory containing the file.
@@ -56,27 +60,6 @@ impl ContentFile {
     /// Returns the relative path of the directory containing the file.
     pub fn rel_dir(&self) -> Utf8PathBuf {
         self.rel_path.parent().unwrap().to_owned()
-    }
-
-    /// Initialize the file content cache and return the contents.
-    pub fn get_contents(&self) -> anyhow::Result<&str> {
-        self.contents
-            .get_or_try_init(|| {
-                std::fs::read(&self.abs_path)
-                    .map(|c| std::str::from_utf8(&c).unwrap().to_string())
-                    .map_err(|e| anyhow::anyhow!("{}", e))
-            })
-            .map(|c| c.as_str())
-    }
-
-    /// Initialize the file hash cache and return the hash.
-    pub fn get_hash(&self) -> anyhow::Result<&str> {
-        self.hash
-            .get_or_try_init(|| {
-                let contents = self.get_contents()?;
-                Ok(utils::hash(contents.as_bytes()))
-            })
-            .map(|h| h.as_str())
     }
 }
 
@@ -92,12 +75,12 @@ pub struct SiteEntry {
 }
 
 impl SiteEntry {
-    pub fn try_new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
+    pub async fn try_new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
         if matches!(
             abs_path.extension(),
             Some("md") | Some("liquid") | Some("html")
         ) {
-            let file = ContentFile::new(pages_dir, abs_path);
+            let file = ContentFile::new(pages_dir, abs_path).await?;
             // let rel_path = abs_path.strip_prefix(pages_dir)?.to_owned();
             let mut out_path = file
                 .rel_path

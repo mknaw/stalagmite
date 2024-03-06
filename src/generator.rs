@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use tempfile::{tempdir, TempDir};
 use tokio_rusqlite::Connection;
 
@@ -58,19 +58,21 @@ async fn check_latest_modified_template(conn: &Connection, templates: &[ContentF
     }
 }
 
-fn collect_templates(config: &Config) -> Vec<ContentFile> {
-    let layouts = diskio::walk(&config.layouts_dir(), &Some("liquid"))
-        .map(|path| ContentFile::new(&config.layouts_dir(), path));
-    let blocks = diskio::walk(&config.blocks_dir(), &Some("liquid"))
-        .map(|path| ContentFile::new(&config.blocks_dir(), path));
-    layouts.chain(blocks).collect()
+async fn collect_templates(config: &Config) -> Vec<ContentFile> {
+    let layout_stream = stream::iter(diskio::walk(&config.layouts_dir(), &Some("liquid")))
+        .then(|path| async move { ContentFile::new(&config.layouts_dir(), path).await.unwrap() });
+    let block_stream = stream::iter(diskio::walk(&config.blocks_dir(), &Some("liquid")))
+        .then(|path| async move { ContentFile::new(&config.blocks_dir(), path).await.unwrap() });
+    layout_stream
+        .chain(block_stream)
+        .collect::<Vec<ContentFile>>()
+        .await
 }
 
 fn parse_page_data(site_entry: &SiteEntry) -> anyhow::Result<PageData> {
     match site_entry.get_page_type() {
         PageType::Markdown => {
-            let contents = site_entry.file.get_contents()?;
-            let markdown = markdown::parse(contents)?;
+            let markdown = markdown::parse(&site_entry.file.contents)?;
             Ok(PageData::Markdown(markdown))
         }
         PageType::Liquid => Ok(PageData::Liquid),
@@ -119,16 +121,25 @@ impl Generator {
     }
 
     async fn generate(&self) -> anyhow::Result<()> {
-        let site_nodes = diskio::collect_site_nodes(self.config.clone());
-        let templates = collect_templates(&self.config);
+        let conn = cache::new_connection().await?;
+        cache::migrate(&conn).await?;
+
+        let site_nodes = diskio::collect_site_nodes(self.config.clone()).await;
+        let templates = collect_templates(&self.config).await;
 
         let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
         let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates).await?;
+        let force_render = {
+            let conn = cache::new_connection().await?;
+            self.config.no_cache
+                || assets_have_changed
+                || check_latest_modified_template(&conn, &templates).await
+        };
         let renderer = Arc::new(Renderer::new(
             &self.config,
             asset_map,
             tailwind_alias,
-            &templates,
+            templates,
         ));
 
         // TODO where will I get these numbers from... what are good numbers?
@@ -139,12 +150,6 @@ impl Generator {
             tokio::sync::mpsc::channel::<RenderListingChannelItem>(10);
 
         // Pre-render pipeline
-        let force_render = {
-            let conn = cache::new_connection().await?;
-            self.config.no_cache
-                || assets_have_changed
-                || check_latest_modified_template(&conn, &templates).await
-        };
         let pre_render_handle = {
             let post_render_tx = post_render_tx.clone();
             self.run_pre_render_pipeline(
@@ -190,31 +195,28 @@ impl Generator {
                 .unwrap();
 
         let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
-        let tailwind_cache_busted = {
+        let tailwind_cache_busted = async {
             let mut class_collector = assets::ClassCollector::new();
-            templates.iter().for_each(|pf| {
-                assets::collect_classes(pf.get_contents().unwrap(), &mut class_collector)
-            });
+            for template in templates {
+                assets::collect_classes(&template.contents, &mut class_collector);
+            }
 
-            site_nodes
-                .iter()
-                .flat_map(|node| {
-                    node.site_entries
-                        .iter()
-                        .filter(|se| matches!(se.get_page_type(), PageType::Html))
-                })
-                .for_each(|se| {
-                    assets::collect_classes(se.file.get_contents().unwrap(), &mut class_collector)
-                });
+            for html_entry in site_nodes.iter().flat_map(|node| {
+                node.site_entries
+                    .iter()
+                    .filter(|se| matches!(se.get_page_type(), PageType::Html))
+            }) {
+                assets::collect_classes(&html_entry.file.contents, &mut class_collector)
+            }
 
             assets::render_css(
                 &tailwind_alias,
                 class_collector,
                 true,
                 self.staging_dir.path(),
-            )?
+            )
         };
-        asset_map.insert(tailwind_alias.clone(), tailwind_cache_busted);
+        asset_map.insert(tailwind_alias.clone(), tailwind_cache_busted.await.unwrap());
         Ok((asset_map, assets_have_changed))
     }
 

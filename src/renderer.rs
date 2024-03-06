@@ -132,14 +132,14 @@ impl Renderer {
         static_asset_map: HashMap<String, String>,
         // TODO why was this needed anyway?
         css_file_name: String,
-        partials: &[ContentFile],
+        partials: Vec<ContentFile>,
     ) -> Self {
         let partials = partials
-            .iter()
+            .into_iter()
             .fold(Partials::empty(), |mut partials, site_entry| {
                 partials.add(
                     make_partial_key(&site_entry.abs_path, &config.project_dir),
-                    site_entry.get_contents().unwrap(),
+                    site_entry.contents,
                 );
                 partials
             });
@@ -188,9 +188,7 @@ impl Renderer {
         match page_data {
             PageData::Markdown(md) => self.render_markdown(site_entry, md, render_rules),
             PageData::Liquid => unimplemented!(),
-            PageData::Html => {
-                self.render_html(site_entry.file.get_contents().unwrap(), render_rules)
-            }
+            PageData::Html => self.render_html(&site_entry.file.contents, render_rules),
         }
     }
 

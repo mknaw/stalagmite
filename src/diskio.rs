@@ -41,7 +41,7 @@ pub fn walk<'a, P: AsRef<Path>>(
 
 /// Iterate over pages directory, sending data pertaining to each directory to a `sink`.
 /// Technically the site topology is a tree, but currently have no need to represent it as such.
-pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
+pub async fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
     let mut site_nodes: Vec<SiteNode> = Vec::new();
     let mut dirs_to_visit: Vec<(Utf8PathBuf, Vec<Arc<RenderRules>>)> = Vec::new();
     let pages_dir = config.pages_dir();
@@ -65,10 +65,12 @@ pub fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
                 })
                 .collect();
 
-            let site_entries: Vec<SiteEntry> = paths
-                .iter()
-                .filter_map(|path| SiteEntry::try_new(&pages_dir, path.clone()).ok())
-                .collect();
+            let mut site_entries = Vec::new();
+            for path in paths.iter() {
+                if let Ok(entry) = SiteEntry::try_new(&pages_dir, path.clone()).await {
+                    site_entries.push(entry);
+                }
+            }
 
             if !site_entries.is_empty() {
                 site_nodes.push(SiteNode {

@@ -131,7 +131,7 @@ pub fn render_css<P: AsRef<Path>>(
     // this requires having iterated through all the files, so you can't do the CSS generation in
     // parallel. meanwhile we'd like to know the tailwind.css file name before we start rendering
     // templates, so we can programmatically list the correct name.
-    let hash = utils::hash(css);
+    let hash = utils::stringify_hash(utils::hash(css));
     let filename = make_cache_busted_name(Path::new(base_name), &hash);
 
     let static_dir = out_dir.as_ref().join("static");
@@ -153,7 +153,7 @@ pub async fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
     let mut changed = false;
     for path_buf in diskio::walk(&assets_dir, &None) {
         let contents = diskio::read_file_contents(&path_buf);
-        let hash = utils::hash(&contents);
+        let hash = utils::stringify_hash(utils::hash(&contents));
         let name = make_cache_busted_name(path_buf.as_path().as_std_path(), &hash);
         let alias = path_buf.strip_prefix(&assets_dir)?.to_string();
         let out = staging_dir

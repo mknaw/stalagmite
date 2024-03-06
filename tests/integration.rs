@@ -10,6 +10,7 @@ async fn generate_example_site() {
         Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap().join("example")).unwrap();
 
     std::fs::remove_dir_all(example_project_dir.join("public")).ok();
+    // TODO this is not the one it ends up using...
     std::fs::remove_file(example_project_dir.join("db.sqlite")).ok();
 
     let config = Arc::new(Config::init(Some(example_project_dir.clone())).unwrap());
