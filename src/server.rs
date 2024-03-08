@@ -127,7 +127,7 @@ where
     {
         let notify = notify.clone();
         // TODO see if we can get `spawn` again...
-        tokio::task::spawn_local(async move {
+        tokio::task::spawn(async move {
             watch(config, notify).await.unwrap();
         });
     }

@@ -4,6 +4,7 @@ use std::ops::Deref;
 
 use camino::Utf8Path;
 use chrono::prelude::*;
+use futures::StreamExt;
 use liquid::partials::{EagerCompiler, InMemorySource};
 use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
@@ -37,14 +38,17 @@ fn make_partial_key(partial_path: &Utf8Path, current_dir: &Utf8Path) -> String {
 }
 
 /// Helper fn for collecting layouts from a directory.
-fn collect_template_map(parser: &Parser, dir: &Utf8Path) -> HashMap<String, Template> {
+async fn collect_template_map(parser: &Parser, dir: &Utf8Path) -> HashMap<String, Template> {
     // TODO stuff like this should be parallelizable..
-    HashMap::from_iter(diskio::walk(dir, &Some("liquid")).map(|path| {
-        let key = make_template_key(path.strip_prefix(dir).unwrap());
-        let raw = fs::read_to_string(&path).unwrap();
-        let layout = parser.parse(raw.trim()).unwrap();
-        (key, layout)
-    }))
+    diskio::walk(dir, &Some("liquid"))
+        .map(|path| {
+            let key = make_template_key(path.strip_prefix(dir).unwrap());
+            let raw = fs::read_to_string(&path).unwrap();
+            let layout = parser.parse(raw.trim()).unwrap();
+            (key, layout)
+        })
+        .collect::<HashMap<_, _>>()
+        .await
 }
 
 fn make_template_key(path: &Utf8Path) -> String {
@@ -127,7 +131,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(
+    pub async fn new(
         config: &Config,
         static_asset_map: HashMap<String, String>,
         // TODO why was this needed anyway?
@@ -157,7 +161,7 @@ impl Renderer {
         // TODO this is really stupid, since we already have this available in `partials`,
         // and we've even done all the reading of those files etc.
         // Or maybe partials should really be partials and these things are kept as templates.
-        let layouts = collect_template_map(&parser, &config.layouts_dir());
+        let layouts = collect_template_map(&parser, &config.layouts_dir()).await;
 
         // TODO this whole maneuver still seems kind of hacky, but it's better than prior art.
         let block_content_template = parser

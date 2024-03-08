@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use tempfile::{tempdir, TempDir};
 use tokio_rusqlite::Connection;
 
@@ -59,10 +59,12 @@ async fn check_latest_modified_template(conn: &Connection, templates: &[ContentF
 }
 
 async fn collect_templates(config: &Config) -> Vec<ContentFile> {
-    let layout_stream = stream::iter(diskio::walk(&config.layouts_dir(), &Some("liquid")))
-        .then(|path| async move { ContentFile::new(&config.layouts_dir(), path).await.unwrap() });
-    let block_stream = stream::iter(diskio::walk(&config.blocks_dir(), &Some("liquid")))
-        .then(|path| async move { ContentFile::new(&config.blocks_dir(), path).await.unwrap() });
+    let layouts_dir = &config.layouts_dir();
+    let layout_stream = diskio::walk(layouts_dir, &Some("liquid"))
+        .then(|path| async move { ContentFile::new(layouts_dir, path.clone()).await.unwrap() });
+    let blocks_dir = &config.blocks_dir();
+    let block_stream = diskio::walk(blocks_dir, &Some("liquid"))
+        .then(|path| async move { ContentFile::new(blocks_dir, path.clone()).await.unwrap() });
     layout_stream
         .chain(block_stream)
         .collect::<Vec<ContentFile>>()
@@ -135,12 +137,8 @@ impl Generator {
                 || assets_have_changed
                 || check_latest_modified_template(&conn, &templates).await
         };
-        let renderer = Arc::new(Renderer::new(
-            &self.config,
-            asset_map,
-            tailwind_alias,
-            templates,
-        ));
+        let renderer =
+            Arc::new(Renderer::new(&self.config, asset_map, tailwind_alias, templates).await);
 
         // TODO where will I get these numbers from... what are good numbers?
         let (render_tx, render_rx) = tokio::sync::mpsc::channel::<RenderChannelItem>(10);

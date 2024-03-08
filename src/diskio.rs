@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
+use futures::{stream, Stream};
 use ignore::Walk;
 use memmap2::Mmap;
 
@@ -15,10 +16,10 @@ pub fn read_file_contents<P: AsRef<Path>>(path: P) -> Mmap {
 }
 
 /// Recursively iterate over all files in the given directory with the given extension.
-pub fn walk<'a, P: AsRef<Path>>(
+pub fn walk<P: AsRef<Path>>(
     dir: P,
-    ext: &'a Option<&'a str>,
-) -> Box<dyn Iterator<Item = Utf8PathBuf> + 'a> {
+    ext: &'static Option<&'static str>,
+) -> impl Stream<Item = Utf8PathBuf> {
     let walk = Walk::new(dir).flatten().filter_map(|entry| {
         let path = entry.path();
         if path.is_file() {
@@ -36,7 +37,7 @@ pub fn walk<'a, P: AsRef<Path>>(
             None
         }
     });
-    Box::new(walk)
+    stream::iter(walk)
 }
 
 /// Iterate over pages directory, sending data pertaining to each directory to a `sink`.

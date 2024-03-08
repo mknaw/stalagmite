@@ -1,16 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
 
+use futures::StreamExt;
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use railwind::warning::Position;
 use railwind::ParsedClass;
 use regex::Regex;
 use thiserror::Error;
+use tokio::fs;
 use tokio_rusqlite::Connection;
 
 use crate::{cache, diskio, utils, Config};
@@ -151,8 +152,10 @@ pub async fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
     let mut static_asset_map = HashMap::new();
     let assets_dir = config.assets_dir();
     let mut changed = false;
-    for path_buf in diskio::walk(&assets_dir, &None) {
-        let contents = diskio::read_file_contents(&path_buf);
+    // TODO probably could do better to convert to a stream...
+    let path_bufs: Vec<camino::Utf8PathBuf> = diskio::walk(&assets_dir, &None).collect().await;
+    for path_buf in path_bufs.iter() {
+        let contents = diskio::read_file_contents(path_buf);
         let hash = utils::stringify_hash(utils::hash(&contents));
         let name = make_cache_busted_name(path_buf.as_path().as_std_path(), &hash);
         let alias = path_buf.strip_prefix(&assets_dir)?.to_string();
@@ -161,8 +164,8 @@ pub async fn collect<C: Deref<Target = Config>, P: AsRef<Path>>(
             .join("static")
             .join(&alias)
             .with_file_name(&name);
-        fs::create_dir_all(out.parent().unwrap())?;
-        fs::copy(&path_buf, out)?;
+        fs::create_dir_all(out.parent().unwrap()).await?;
+        fs::copy(&path_buf, out).await?;
         changed |= cache::check_asset_changed(conn, &alias, &hash).await?;
         static_asset_map.insert(alias, name.to_string_lossy().to_string());
     }
