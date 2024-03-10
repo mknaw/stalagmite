@@ -40,7 +40,7 @@ pub fn walk<P: AsRef<Path>>(
     stream::iter(walk)
 }
 
-/// Iterate over pages directory, sending data pertaining to each directory to a `sink`.
+/// Iterate over pages directory, collecting each level as a `SiteNode`.
 /// Technically the site topology is a tree, but currently have no need to represent it as such.
 pub async fn collect_site_nodes(config: Arc<Config>) -> Vec<SiteNode> {
     let mut site_nodes: Vec<SiteNode> = Vec::new();

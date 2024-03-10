@@ -157,6 +157,7 @@ pub enum PageData {
     Markdown(Markdown),
     Liquid,
     Html,
+    Listing(String, Vec<(Markdown, String)>, PageIndex),
 }
 
 #[derive(Debug, Serialize)]

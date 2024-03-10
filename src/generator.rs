@@ -382,10 +382,14 @@ impl Generator {
         let index = 0; // TODO enumerate
         while let Some(group) = stream.next().await {
             // TODO need to get the page count (sqlite also).
-            let rendered = renderer.render_listing_page(
-                &group,
+            let rendered = renderer.render(
+                &(
+                    group_path,
+                    &group[..],
+                    (index.try_into().unwrap(), page_count),
+                ),
                 render_rules,
-                (index.try_into().unwrap(), page_count),
+                &render_rules.listing.as_ref().unwrap().layouts,
             )?;
             let out_path = self
                 .staging_dir

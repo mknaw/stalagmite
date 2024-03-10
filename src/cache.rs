@@ -167,6 +167,7 @@ pub async fn cache(
         PageData::Markdown(md) => cache_markdown(conn, site_entry, &md, rendered).await,
         PageData::Liquid => cache_page(conn, site_entry, rendered).await,
         PageData::Html => cache_page(conn, site_entry, rendered).await,
+        PageData::Listing(..) => unimplemented!(),
     }
 }
 

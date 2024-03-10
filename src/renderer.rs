@@ -59,36 +59,63 @@ fn make_template_key(path: &Utf8Path) -> String {
     }
 }
 
-#[derive(Debug)]
-enum Renderable<'a> {
-    Markdown(&'a Markdown),
-    Html(&'a str),
-}
-
-impl Renderable<'_> {
-    fn render<R: Deref<Target = RenderRules>>(
-        &self,
-        renderer: &Renderer,
-        render_rules: &R,
-    ) -> String {
-        match self {
-            Self::Markdown(md) => renderer.render_blocks(&md.blocks, &render_rules.block_rules),
-            Self::Html(html) => html.to_string(),
-        }
+pub trait Renderable {
+    fn get_inner_content(&self, _renderer: &Renderer, _render_rules: &RenderRules) -> String {
+        "".to_string()
     }
 
-    fn get_context(&self) -> liquid::Object {
-        match self {
-            Self::Markdown(markdown) => liquid::object!({
-                "title": markdown.frontmatter.title.clone(),
-                "timestamp": markdown.frontmatter.timestamp.to_rfc3339(),
-            }),
-            // TODO this is kind of hack but alas, works for now.
-            _ => liquid::object!({
-                "title": "",
-                "timestamp": "",
-            }),
-        }
+    fn get_meta_context(&self) -> liquid::Object;
+}
+
+impl Renderable for Markdown {
+    fn get_inner_content(&self, renderer: &Renderer, render_rules: &RenderRules) -> String {
+        renderer.render_blocks(&self.blocks, &render_rules.block_rules)
+    }
+
+    fn get_meta_context(&self) -> liquid::Object {
+        liquid::object!({
+            "title": self.frontmatter.title.clone(),
+            "timestamp": self.frontmatter.timestamp.to_rfc3339(),
+        })
+    }
+}
+
+impl Renderable for &str {
+    fn get_inner_content(&self, _renderer: &Renderer, _render_rules: &RenderRules) -> String {
+        self.to_string()
+    }
+
+    fn get_meta_context(&self) -> liquid::Object {
+        liquid::object!({
+            "title": "",
+            "timestamp": "",
+        })
+    }
+}
+
+// TODO replace with some struct, rather than this insane `self.2.0` stuff.
+impl Renderable for (&str, &[(Markdown, String)], PageIndex) {
+    fn get_meta_context(&self) -> liquid::Object {
+        let entries: Vec<ListingEntry> = self.1.iter().map(|markdown| markdown.into()).collect();
+
+        let prev_page_link = if self.2 .0 == 0 {
+            None
+        } else {
+            Some(format!("/{}/{}/", self.0, self.2 .0 - 1))
+        };
+        let next_page_link = if (self.2 .0 + 1) == self.2 .1 {
+            None
+        } else {
+            Some(format!("/{}/{}/", self.0, self.2 .0 + 1))
+        };
+
+        liquid::object!({
+            "title": "",
+            "timestamp": "",
+            "entries": entries,
+            "prev_page_link": prev_page_link, // TODO
+            "next_page_link": next_page_link, // TODO
+        })
     }
 }
 
@@ -190,103 +217,44 @@ impl Renderer {
         render_rules: &R,
     ) -> RenderResult<String> {
         match page_data {
-            PageData::Markdown(md) => self.render_markdown(site_entry, md, render_rules),
+            PageData::Markdown(md) => self.render(md, render_rules, &render_rules.layouts),
             PageData::Liquid => unimplemented!(),
-            PageData::Html => self.render_html(&site_entry.file.contents, render_rules),
+            PageData::Html => self.render(
+                &site_entry.file.contents.as_str(),
+                render_rules,
+                &render_rules.layouts,
+            ),
+            PageData::Listing(..) => unimplemented!(),
         }
     }
 
-    pub fn render_listing_page<R: Deref<Target = RenderRules>>(
-        &self,
-        markdowns: &[(Markdown, String)],
-        render_rules: &R,
-        page_index: PageIndex,
-    ) -> RenderResult<String> {
-        // TODO feels like the parsing of blocks within the markdown should be lazy,
-        // but that could be tricky.
-
-        // TODO ought to genericize this `layout_stack` recursion pattern..
-        // or just learn the proper `liquid` idioms?
-        // let layout_stack = &render_rules.clone().layouts[..];
-        // TODO for now just use the first, will return to this later.
-        // TODO should settle on either calling `layout` or `template`? Maybe?
-        let layouts = &render_rules.listing.as_ref().unwrap().layouts;
-        let template = self.get_template(&layouts[0]);
-        let entries: Vec<ListingEntry> = markdowns.iter().map(|markdown| markdown.into()).collect();
-        let prev_page_link = if page_index.0 == 0 {
-            None
-        } else {
-            // TODO have to get from some `dir_path` instead of hardcoding.
-            Some(format!("/blog/{}/", page_index.0 - 1))
-        };
-        let next_page_link = if (page_index.0 + 1) == page_index.1 {
-            None
-        } else {
-            Some(format!("/blog/{}/", page_index.0 + 1))
-        };
-        let globals = liquid::object!({
-            "entries": entries,
-            "prev_page_link": prev_page_link, // TODO
-            "next_page_link": next_page_link, // TODO
-            // TODO should be constants for these, since it's used in the tag.
-            BLOCK_RULES_TEMPLATE_VAR: render_rules.block_rules,
-            STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
-            TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
-        });
-        // TODO better not to discard the info from here
-        template.render(&globals).map_err(Into::into)
-    }
-
-    // TODO not sure `render` has to know that it is `Arc`,
-    // probably here is where one uses a `Deref to RenderRuleSet` kind of pattern.
-    fn render_markdown<R: Deref<Target = RenderRules>>(
-        &self,
-        site_entry: &SiteEntry,
-        markdown: &Markdown,
-        render_rules: &R,
-    ) -> RenderResult<String> {
-        tracing::debug!(
-            "rendering {:?}/{}",
-            site_entry.file.rel_dir(),
-            markdown.frontmatter.slug
-        );
-        let layout_stack = &render_rules.layouts[..];
-        self.render_content(&Renderable::Markdown(markdown), render_rules, layout_stack)
-    }
-
-    fn render_html<R: Deref<Target = RenderRules>>(
-        &self,
-        html: &str,
-        render_rules: &R,
-    ) -> RenderResult<String> {
-        let layout_stack = &render_rules.layouts[..];
-        self.render_content(&Renderable::Html(html), render_rules, layout_stack)
-    }
-
     // Recursively render liquid templates, allowing specification of nested layouts.
-    // TODO nicer to pass an iterator over layouts perhaps, instead of a slice
-    fn render_content<R: Deref<Target = RenderRules>>(
+    pub fn render<R: Deref<Target = RenderRules>>(
         &self,
-        renderable: &Renderable,
+        renderable: &dyn Renderable,
         render_rules: &R,
-        layout_stack: &[String],
+        layouts: &[String],
     ) -> RenderResult<String> {
-        assert!(!layout_stack.is_empty());
+        let mut content = renderable.get_inner_content(self, render_rules);
 
-        let template = self.get_template(&layout_stack[0]);
-        let content = if layout_stack.len() == 1 {
-            renderable.render(self, render_rules)
-        } else {
-            self.render_content(renderable, render_rules, &layout_stack[1..])?
-        };
-        let globals = liquid::object!({
-            "meta": renderable.get_context(),
-            "content": content,
-            STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
-            TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
-        });
-        // TODO better not to discard the info from here
-        template.render(&globals).map_err(Into::into)
+        let meta_context = renderable.get_meta_context();
+
+        for layout in layouts.iter().rev() {
+            println!("{:?}", layout);
+            println!("{:?}", content);
+            let template = self.get_template(layout);
+            let globals = liquid::object!({
+                // Kind of stupid to be cloning this stuff, but whatever.
+                "meta": meta_context.clone(),
+                "content": content,
+                BLOCK_RULES_TEMPLATE_VAR: render_rules.block_rules,
+                STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
+                TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
+            });
+            // TODO better not to discard the info from here
+            content = template.render(&globals)?;
+        }
+        Ok(content)
     }
 
     // TODO should be a `Result`.

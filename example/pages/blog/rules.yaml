@@ -5,4 +5,5 @@ blocks:
   p: fancy-paragraph
 listing:
   layouts:
+    - primary
     - post-listings
