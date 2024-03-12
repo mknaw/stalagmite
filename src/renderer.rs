@@ -10,7 +10,7 @@ use liquid::{ObjectView, Parser, ParserBuilder, Template, ValueView};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::common::{Block, BlockRules, ContentFile, PageData, PageIndex, RenderRules, SiteEntry};
+use crate::common::{Block, BlockRules, ContentFile, PageData, RenderRules};
 use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
@@ -59,63 +59,51 @@ fn make_template_key(path: &Utf8Path) -> String {
     }
 }
 
-pub trait Renderable {
-    fn get_inner_content(&self, _renderer: &Renderer, _render_rules: &RenderRules) -> String {
-        "".to_string()
-    }
-
-    fn get_meta_context(&self) -> liquid::Object;
-}
-
-impl Renderable for Markdown {
-    fn get_inner_content(&self, renderer: &Renderer, render_rules: &RenderRules) -> String {
-        renderer.render_blocks(&self.blocks, &render_rules.block_rules)
-    }
-
-    fn get_meta_context(&self) -> liquid::Object {
-        liquid::object!({
-            "title": self.frontmatter.title.clone(),
-            "timestamp": self.frontmatter.timestamp.to_rfc3339(),
-        })
+fn get_inner_content(
+    renderer: &Renderer,
+    render_rules: &RenderRules,
+    page_data: &PageData,
+) -> String {
+    match page_data {
+        PageData::Markdown(md) => renderer.render_blocks(&md.blocks, &render_rules.block_rules),
+        _ => "".to_string(),
     }
 }
 
-impl Renderable for &str {
-    fn get_inner_content(&self, _renderer: &Renderer, _render_rules: &RenderRules) -> String {
-        self.to_string()
-    }
+fn get_meta_context(page_data: &PageData) -> liquid::Object {
+    match page_data {
+        PageData::Markdown(md) => {
+            liquid::object!({
+                "title": md.frontmatter.title.clone(),
+                "timestamp": md.frontmatter.timestamp.to_rfc3339(),
+            })
+        }
+        PageData::Listing(group_path, group, page_index) => {
+            let entries: Vec<ListingEntry> = group.iter().map(|markdown| markdown.into()).collect();
 
-    fn get_meta_context(&self) -> liquid::Object {
-        liquid::object!({
+            let prev_page_link = if page_index.0 == 0 {
+                None
+            } else {
+                Some(format!("/{}/{}/", group_path, page_index.0 - 1))
+            };
+            let next_page_link = if (page_index.0 + 1) == page_index.1 {
+                None
+            } else {
+                Some(format!("/{}/{}/", group_path, page_index.0 + 1))
+            };
+
+            liquid::object!({
+                "title": "",
+                "timestamp": "",
+                "entries": entries,
+                "prev_page_link": prev_page_link, // TODO
+                "next_page_link": next_page_link, // TODO
+            })
+        }
+        _ => liquid::object!({
             "title": "",
             "timestamp": "",
-        })
-    }
-}
-
-// TODO replace with some struct, rather than this insane `self.2.0` stuff.
-impl Renderable for (&str, &[(Markdown, String)], PageIndex) {
-    fn get_meta_context(&self) -> liquid::Object {
-        let entries: Vec<ListingEntry> = self.1.iter().map(|markdown| markdown.into()).collect();
-
-        let prev_page_link = if self.2 .0 == 0 {
-            None
-        } else {
-            Some(format!("/{}/{}/", self.0, self.2 .0 - 1))
-        };
-        let next_page_link = if (self.2 .0 + 1) == self.2 .1 {
-            None
-        } else {
-            Some(format!("/{}/{}/", self.0, self.2 .0 + 1))
-        };
-
-        liquid::object!({
-            "title": "",
-            "timestamp": "",
-            "entries": entries,
-            "prev_page_link": prev_page_link, // TODO
-            "next_page_link": next_page_link, // TODO
-        })
+        }),
     }
 }
 
@@ -165,15 +153,16 @@ impl Renderer {
         css_file_name: String,
         partials: Vec<ContentFile>,
     ) -> Self {
-        let partials = partials
-            .into_iter()
-            .fold(Partials::empty(), |mut partials, site_entry| {
-                partials.add(
-                    make_partial_key(&site_entry.abs_path, &config.project_dir),
-                    site_entry.contents,
-                );
-                partials
-            });
+        let partials =
+            partials
+                .into_iter()
+                .fold(Partials::empty(), |mut partials, content_file| {
+                    partials.add(
+                        make_partial_key(&content_file.abs_path, &config.project_dir),
+                        content_file.contents,
+                    );
+                    partials
+                });
 
         let parser = ParserBuilder::with_stdlib()
             // TODO don't think this is needed as is... but maybe interesting soon.
@@ -210,34 +199,16 @@ impl Renderer {
             .unwrap_or_else(|| panic!("could not locate layout: {}", template_name))
     }
 
-    pub fn render_page<R: Deref<Target = RenderRules>>(
-        &self,
-        page_data: &PageData,
-        site_entry: &SiteEntry,
-        render_rules: &R,
-    ) -> RenderResult<String> {
-        match page_data {
-            PageData::Markdown(md) => self.render(md, render_rules, &render_rules.layouts),
-            PageData::Liquid => unimplemented!(),
-            PageData::Html => self.render(
-                &site_entry.file.contents.as_str(),
-                render_rules,
-                &render_rules.layouts,
-            ),
-            PageData::Listing(..) => unimplemented!(),
-        }
-    }
-
     // Recursively render liquid templates, allowing specification of nested layouts.
     pub fn render<R: Deref<Target = RenderRules>>(
         &self,
-        renderable: &dyn Renderable,
+        page_data: &PageData,
         render_rules: &R,
         layouts: &[String],
     ) -> RenderResult<String> {
-        let mut content = renderable.get_inner_content(self, render_rules);
+        let mut content = get_inner_content(self, render_rules, page_data);
 
-        let meta_context = renderable.get_meta_context();
+        let meta_context = get_meta_context(page_data);
 
         for layout in layouts.iter().rev() {
             println!("{:?}", layout);

@@ -168,7 +168,7 @@ impl Generator {
         tokio::join!(pre_render_handle, render_handle, post_render_handle,);
 
         while let Some((dir, render_rules)) = render_listing_rx.recv().await {
-            self.generate_listing(&renderer, &render_rules, &dir)
+            self.generate_listing(&renderer, &render_rules, dir)
                 .await
                 .unwrap();
         }
@@ -330,7 +330,7 @@ impl Generator {
                 // TODO err handle
                 let page_data = parse_page_data(&site_entry).unwrap();
                 let rendered = renderer
-                    .render_page(&page_data, &site_entry, &render_rules)
+                    .render(&page_data, &render_rules, &render_rules.layouts)
                     .unwrap();
                 rayon_tx
                     .send((site_entry, page_data, Arc::new(rendered)))
@@ -361,7 +361,7 @@ impl Generator {
         &self,
         renderer: &Renderer,
         render_rules: &R,
-        group_path: &str,
+        group_path: String,
     ) -> anyhow::Result<()> {
         let conn = cache::new_connection().await?;
         // Should be OK to unwrap here.
@@ -374,27 +374,24 @@ impl Generator {
         // TODO need to get the right pagination count.
         // TODO also should be able to restore cached renders from the db!
         let page_count = divide_round_up(
-            cache::get_page_group_count(&conn, group_path).await?,
+            cache::get_page_group_count(&conn, &group_path).await?,
             page_size,
         );
-        let stream = cache::markdown_stream(conn, group_path, page_size);
+        let stream = cache::markdown_stream(conn, &group_path, page_size);
         futures::pin_mut!(stream);
         let index = 0; // TODO enumerate
         while let Some(group) = stream.next().await {
             // TODO need to get the page count (sqlite also).
+            let page_data = PageData::Listing(group_path.clone(), group, (index, page_count));
             let rendered = renderer.render(
-                &(
-                    group_path,
-                    &group[..],
-                    (index.try_into().unwrap(), page_count),
-                ),
+                &page_data,
                 render_rules,
                 &render_rules.listing.as_ref().unwrap().layouts,
             )?;
             let out_path = self
                 .staging_dir
                 .path()
-                .join(group_path)
+                .join(&group_path)
                 .join(format!("{}/index.html", index));
             fs::create_dir_all(out_path.parent().unwrap())?;
             diskio::write_html_sync(out_path, &rendered)?;
