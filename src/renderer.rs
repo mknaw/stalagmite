@@ -66,6 +66,7 @@ fn get_inner_content(
 ) -> String {
     match page_data {
         PageData::Markdown(md) => renderer.render_blocks(&md.blocks, &render_rules.block_rules),
+        PageData::Html(html) => html.inner.clone(),
         _ => "".to_string(),
     }
 }
@@ -159,7 +160,7 @@ impl Renderer {
                 .fold(Partials::empty(), |mut partials, content_file| {
                     partials.add(
                         make_partial_key(&content_file.abs_path, &config.project_dir),
-                        content_file.contents,
+                        content_file.content.unwrap().inner,
                     );
                     partials
                 });
@@ -211,8 +212,6 @@ impl Renderer {
         let meta_context = get_meta_context(page_data);
 
         for layout in layouts.iter().rev() {
-            println!("{:?}", layout);
-            println!("{:?}", content);
             let template = self.get_template(layout);
             let globals = liquid::object!({
                 // Kind of stupid to be cloning this stuff, but whatever.

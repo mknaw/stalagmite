@@ -16,10 +16,6 @@ use tokio_rusqlite::Connection;
 
 use crate::{cache, diskio, utils, Config};
 
-// TODO probably should be using seemingly better `tailwind-rs` instead of `railwind`.
-// that comes with its own problems, like wanting HTML files to parse instead of
-// just regexing the classes from the liquids. but it does other things better.
-
 lazy_static! {
     // Silly copy-pasta we must do to work around overly restrictive public API of `railwind`.
     // TODO maybe parsing the HTML like tailwind-rs does is OK at this point?

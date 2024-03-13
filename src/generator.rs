@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
+use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use tempfile::{tempdir, TempDir};
@@ -71,14 +72,14 @@ async fn collect_templates(config: &Config) -> Vec<ContentFile> {
         .await
 }
 
-fn parse_page_data(site_entry: &SiteEntry) -> anyhow::Result<PageData> {
+fn parse_page_data(site_entry: &SiteEntry, file_content: FileContent) -> anyhow::Result<PageData> {
     match site_entry.get_page_type() {
         PageType::Markdown => {
-            let markdown = markdown::parse(&site_entry.file.contents)?;
+            let markdown = markdown::parse(&file_content)?;
             Ok(PageData::Markdown(markdown))
         }
-        PageType::Liquid => Ok(PageData::Liquid),
-        PageType::Html => Ok(PageData::Html),
+        PageType::Liquid => Ok(PageData::Liquid(file_content)),
+        PageType::Html => Ok(PageData::Html(file_content)),
     }
 }
 
@@ -103,8 +104,8 @@ fn copy_previously_generated<C: Deref<Target = Config>, P: AsRef<Path>>(
     }
 }
 
-type RenderChannelItem = (Arc<SiteEntry>, Arc<RenderRules>);
-type PostRenderChannelItem = (Arc<SiteEntry>, PageData, Arc<String>);
+type RenderChannelItem = (SiteEntry, Arc<RenderRules>);
+type PostRenderChannelItem = (SiteEntry, CachedPageData);
 type RenderListingChannelItem = (String, Arc<RenderRules>);
 
 struct Generator {
@@ -126,8 +127,22 @@ impl Generator {
         let conn = cache::new_connection().await?;
         cache::migrate(&conn).await?;
 
-        let site_nodes = diskio::collect_site_nodes(self.config.clone()).await;
-        let templates = collect_templates(&self.config).await;
+        let mut site_nodes = diskio::collect_site_nodes(self.config.clone()).await;
+        let load_content_futures: Vec<_> = site_nodes
+            .iter_mut()
+            .flat_map(|node| {
+                node.site_entries
+                    .iter_mut()
+                    .map(|entry| entry.file.initialize_file_content())
+            })
+            .collect();
+        join_all(load_content_futures).await;
+
+        let mut templates = collect_templates(&self.config).await;
+        let load_content_futures = templates
+            .iter_mut()
+            .map(|template| template.initialize_file_content());
+        join_all(load_content_futures).await;
 
         let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
         let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates).await?;
@@ -196,7 +211,8 @@ impl Generator {
         let tailwind_cache_busted = async {
             let mut class_collector = assets::ClassCollector::new();
             for template in templates {
-                assets::collect_classes(&template.contents, &mut class_collector);
+                // Know that we've already loaded, so `unwrap` is OK.
+                assets::collect_classes(template.content.as_ref().unwrap(), &mut class_collector);
             }
 
             for html_entry in site_nodes.iter().flat_map(|node| {
@@ -204,7 +220,11 @@ impl Generator {
                     .iter()
                     .filter(|se| matches!(se.get_page_type(), PageType::Html))
             }) {
-                assets::collect_classes(&html_entry.file.contents, &mut class_collector)
+                // Know that we've already loaded, so `unwrap` is OK.
+                assets::collect_classes(
+                    html_entry.file.content.as_ref().unwrap(),
+                    &mut class_collector,
+                )
             }
 
             assets::render_css(
@@ -253,13 +273,12 @@ impl Generator {
         render_listing_tx: &tokio::sync::mpsc::Sender<RenderListingChannelItem>,
     ) -> anyhow::Result<()> {
         for site_entry in node.site_entries {
-            let site_entry = Arc::new(site_entry);
-            if !force_render && let Some((page_data, rendered)) =
+            if !force_render && let Some(cached_page_data) =
                 // TODO this should be an async fn
                 self.try_restore_from_cache(conn, &site_entry).await?
             {
                 post_render_tx
-                    .send((site_entry, page_data, Arc::new(rendered)))
+                    .send((site_entry, cached_page_data))
                     .await?;
             } else {
                 render_tx
@@ -284,8 +303,8 @@ impl Generator {
         &self,
         conn: &Connection,
         site_entry: &SiteEntry,
-    ) -> anyhow::Result<Option<(PageData, String)>> {
-        if let Some((page_data, rendered)) = cache::restore_cached(conn, site_entry).await? {
+    ) -> anyhow::Result<Option<CachedPageData>> {
+        if let Some(cached_page_data) = cache::restore_cached(conn, site_entry).await? {
             match copy_previously_generated(&self.config, site_entry, self.staging_dir.as_ref()) {
                 Ok(_) => {
                     tracing::info!(
@@ -293,7 +312,7 @@ impl Generator {
                         site_entry.out_path
                     );
 
-                    return Ok(Some((page_data, rendered)));
+                    return Ok(Some(cached_page_data));
                 }
                 Err(e) => {
                     tracing::warn!("error copying previously generated file: {:?}", e);
@@ -314,26 +333,34 @@ impl Generator {
         let (rayon_tx, mut rayon_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tokio::spawn(async move {
-            while let Some((site_entry, page_data, rendered)) = rayon_rx.recv().await {
+            while let Some((site_entry, cached_page_data)) = rayon_rx.recv().await {
                 post_render_tx
-                    .send((site_entry, page_data, rendered))
+                    .send((site_entry, cached_page_data))
                     .await
                     .unwrap();
             }
         });
 
-        while let Some((site_entry, render_rules)) = render_rx.recv().await {
+        while let Some((mut site_entry, render_rules)) = render_rx.recv().await {
             let rayon_tx = rayon_tx.clone();
             let renderer = renderer.clone();
+            // Shouldn't actually be awaiting this for long, since we've likely had it loaded.
+            let file_content = site_entry.file.get_content().await.unwrap();
             rayon::spawn(move || {
                 tracing::debug!("rendering page: {:?}", site_entry.file.rel_path);
-                // TODO err handle
-                let page_data = parse_page_data(&site_entry).unwrap();
+                let hash = file_content.hash;
+                let page_data = parse_page_data(&site_entry, file_content).unwrap();
                 let rendered = renderer
                     .render(&page_data, &render_rules, &render_rules.layouts)
                     .unwrap();
+                let cached_page_data = match page_data {
+                    PageData::Markdown(md) => CachedPageData::Markdown(hash, md, rendered),
+                    PageData::Liquid(_) => CachedPageData::Liquid(hash, rendered),
+                    PageData::Html(_) => CachedPageData::Html(hash, rendered),
+                    PageData::Listing(..) => unimplemented!(),
+                };
                 rayon_tx
-                    .send((site_entry, page_data, Arc::new(rendered)))
+                    .send((site_entry, cached_page_data))
                     .unwrap_or_else(|_| unreachable!());
             });
         }
@@ -343,15 +370,18 @@ impl Generator {
         &self,
         mut post_render_rx: tokio::sync::mpsc::Receiver<PostRenderChannelItem>,
     ) {
-        while let Some((site_entry, page_data, rendered)) = post_render_rx.recv().await {
+        while let Some((site_entry, cached_page_data)) = post_render_rx.recv().await {
             let staging_path = self.staging_dir.path().to_path_buf();
             tracing::debug!("writing rendered page to disk");
             // TODO really should use async rusqlite for this...
             let conn = cache::new_connection().await.unwrap();
-            cache::cache(&conn, page_data, site_entry.clone(), rendered.clone())
-                .await
-                .unwrap();
-            diskio::write_html(staging_path.join(&site_entry.out_path), &rendered)
+            diskio::write_html(
+                staging_path.join(&site_entry.out_path),
+                cached_page_data.get_rendered(),
+            )
+            .await
+            .unwrap();
+            cache::cache(&conn, cached_page_data, site_entry)
                 .await
                 .unwrap();
         }

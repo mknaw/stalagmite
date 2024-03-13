@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -26,29 +27,38 @@ pub enum PageType {
 }
 
 #[derive(Debug)]
+pub struct FileContent {
+    // File contents.
+    pub inner: String,
+    // Cached content hash.
+    pub hash: u64,
+}
+
+impl Deref for FileContent {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[derive(Debug)]
 pub struct ContentFile {
     // Absolute path of the file.
     pub abs_path: Utf8PathBuf,
     // Path relative to the pages directory.
     pub rel_path: Utf8PathBuf,
-    // File contents.
-    pub contents: String,
-    // Cached content hash.
-    pub hash: u64,
+    // File contents. Option so we take ownership of the contents.
+    pub content: Option<FileContent>,
 }
 
 impl ContentFile {
     pub async fn new(pages_dir: &Utf8Path, abs_path: Utf8PathBuf) -> anyhow::Result<Self> {
         let rel_path = abs_path.strip_prefix(pages_dir).unwrap().to_owned();
-        let contents = tokio::fs::read(&abs_path).await;
-        let hash = utils::hash(contents.as_ref().unwrap());
         Ok(Self {
             abs_path,
             rel_path,
-            contents: contents
-                .map(|c| std::str::from_utf8(&c).unwrap().to_string())
-                .map_err(|e| anyhow::anyhow!("{}", e))?,
-            hash,
+            content: None,
         })
     }
 
@@ -60,6 +70,31 @@ impl ContentFile {
     /// Returns the relative path of the directory containing the file.
     pub fn rel_dir(&self) -> Utf8PathBuf {
         self.rel_path.parent().unwrap().to_owned()
+    }
+
+    pub async fn initialize_file_content(&mut self) -> anyhow::Result<()> {
+        if self.content.is_none() {
+            let contents = tokio::fs::read(&self.abs_path).await;
+            let hash = utils::hash(contents.as_ref().unwrap());
+            self.content = Some(FileContent {
+                inner: contents
+                    .map(|c| std::str::from_utf8(&c).unwrap().to_string())
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                hash,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn get_content(&mut self) -> anyhow::Result<FileContent> {
+        if let Some(fc) = self.content.take() {
+            Ok(fc)
+        } else {
+            self.initialize_file_content().await?;
+            // Ought to be OK to `unwrap` this.
+            let fc = self.content.take().unwrap();
+            Ok(fc)
+        }
     }
 }
 
@@ -155,9 +190,26 @@ pub struct SiteNode {
 #[derive(Debug)]
 pub enum PageData {
     Markdown(Markdown),
-    Liquid,
-    Html,
+    Liquid(FileContent),
+    Html(FileContent),
     Listing(String, Vec<(Markdown, String)>, PageIndex),
+}
+
+#[derive(Debug)]
+pub enum CachedPageData {
+    Markdown(u64, Markdown, String),
+    Liquid(u64, String),
+    Html(u64, String),
+}
+
+impl CachedPageData {
+    pub fn get_rendered(&self) -> &str {
+        match self {
+            CachedPageData::Markdown(_, _, s) => s,
+            CachedPageData::Liquid(_, s) => s,
+            CachedPageData::Html(_, s) => s,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

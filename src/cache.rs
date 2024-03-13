@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use futures::stream::unfold;
 use futures::Stream;
 use tokio_rusqlite::*;
@@ -90,17 +88,18 @@ pub async fn set_latest_template_modified(conn: &Connection, time: u64) -> Resul
 pub async fn restore_cached(
     conn: &Connection,
     site_entry: &SiteEntry,
-) -> anyhow::Result<Option<(PageData, String)>> {
+) -> anyhow::Result<Option<CachedPageData>> {
+    let hash = site_entry.file.content.as_ref().unwrap().hash;
     let query_result = match site_entry.get_page_type() {
-        PageType::Markdown => restore_cached_markdown(conn, site_entry)
+        PageType::Markdown => restore_cached_markdown(conn, site_entry, hash)
             .await?
-            .map(|(md, rendered)| (PageData::Markdown(md), rendered)),
-        PageType::Liquid => restore_cached_page(conn, site_entry)
+            .map(|(md, rendered)| (CachedPageData::Markdown(hash, md, rendered))),
+        PageType::Liquid => restore_cached_page(conn, site_entry, hash)
             .await?
-            .map(|rendered| (PageData::Liquid, rendered)),
-        PageType::Html => restore_cached_page(conn, site_entry)
+            .map(|rendered| (CachedPageData::Liquid(hash, rendered))),
+        PageType::Html => restore_cached_page(conn, site_entry, hash)
             .await?
-            .map(|rendered| (PageData::Html, rendered)),
+            .map(|rendered| (CachedPageData::Html(hash, rendered))),
     };
     Ok(query_result)
 }
@@ -109,15 +108,15 @@ pub async fn restore_cached(
 async fn restore_cached_markdown(
     conn: &Connection,
     site_entry: &SiteEntry,
+    hash: u64,
 ) -> Result<Option<(Markdown, String)>> {
     let url_path = site_entry.url_path.clone();
-    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.query_row(
             "SELECT frontmatter, blocks, rendered FROM markdowns WHERE url=:url AND hash=:hash",
             named_params! {
                 ":url": url_path,
-                ":hash": hash,
+                ":hash": utils::stringify_hash(hash),
             },
             |row| {
                 let frontmatter: String = row.get(0)?;
@@ -136,15 +135,18 @@ async fn restore_cached_markdown(
     .await
 }
 
-async fn restore_cached_page(conn: &Connection, site_entry: &SiteEntry) -> Result<Option<String>> {
+async fn restore_cached_page(
+    conn: &Connection,
+    site_entry: &SiteEntry,
+    hash: u64,
+) -> Result<Option<String>> {
     let url_path = site_entry.url_path.clone();
-    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.query_row(
             "SELECT rendered FROM pages WHERE url=:url AND hash=:hash",
             named_params! {
                 ":url": url_path,
-                ":hash": hash,
+                ":hash": utils::stringify_hash(hash),
             },
             |row| {
                 let rendered: String = row.get(0)?;
@@ -159,28 +161,29 @@ async fn restore_cached_page(conn: &Connection, site_entry: &SiteEntry) -> Resul
 
 pub async fn cache(
     conn: &Connection,
-    page_data: PageData,
-    site_entry: Arc<SiteEntry>,
-    rendered: Arc<String>,
+    cached_page_data: CachedPageData,
+    site_entry: SiteEntry,
 ) -> anyhow::Result<()> {
-    match page_data {
-        PageData::Markdown(md) => cache_markdown(conn, site_entry, &md, rendered).await,
-        PageData::Liquid => cache_page(conn, site_entry, rendered).await,
-        PageData::Html => cache_page(conn, site_entry, rendered).await,
-        PageData::Listing(..) => unimplemented!(),
+    match cached_page_data {
+        CachedPageData::Markdown(hash, md, rendered) => {
+            cache_markdown(conn, site_entry, &md, rendered, hash).await
+        }
+        CachedPageData::Liquid(hash, rendered) | CachedPageData::Html(hash, rendered) => {
+            cache_page(conn, site_entry, rendered, hash).await
+        }
     }
 }
 
 async fn cache_markdown(
     conn: &Connection,
-    site_entry: Arc<SiteEntry>,
+    site_entry: SiteEntry,
     markdown: &Markdown,
-    rendered: Arc<String>,
+    rendered: String,
+    hash: u64,
 ) -> anyhow::Result<()> {
     let frontmatter = serde_yaml::to_string(&markdown.frontmatter).unwrap();
     let blocks = serde_yaml::to_string(&markdown.blocks).unwrap();
     let timestamp = markdown.frontmatter.timestamp.timestamp();
-    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.execute(
             "INSERT INTO markdowns (url, parent_url, hash, timestamp, frontmatter, blocks, rendered)
@@ -194,7 +197,7 @@ async fn cache_markdown(
             named_params! {
                 ":url": site_entry.url_path,
                 ":parent_url": site_entry.parent_url(),
-                ":hash": hash,
+                ":hash": utils::stringify_hash(hash),
                 ":timestamp": timestamp,
                 ":frontmatter": &frontmatter,
                 ":blocks": &blocks,
@@ -209,10 +212,10 @@ async fn cache_markdown(
 
 async fn cache_page(
     conn: &Connection,
-    site_entry: Arc<SiteEntry>,
-    rendered: Arc<String>,
+    site_entry: SiteEntry,
+    rendered: String,
+    hash: u64,
 ) -> anyhow::Result<()> {
-    let hash = utils::stringify_hash(site_entry.file.hash);
     conn.call(move |conn| {
         conn.execute(
             "INSERT INTO pages (url, hash, rendered)
@@ -224,7 +227,7 @@ async fn cache_page(
             ",
             named_params! {
                 ":url": site_entry.url_path,
-                ":hash": hash,
+                ":hash": utils::stringify_hash(hash),
                 ":rendered": rendered,
             },
         )

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
+use futures::StreamExt;
 use stalagmite::diskio::walk;
 use stalagmite::{generate, Config};
 
@@ -21,19 +22,18 @@ async fn generate_example_site() {
     let out_dir = example_project_dir.join("public");
     let mut files: Vec<Utf8PathBuf> = walk(&out_dir, &Some("html"))
         .map(|p| p.strip_prefix(&out_dir).unwrap().to_owned())
-        .collect();
+        .collect()
+        .await;
     files.sort();
-    assert_eq!(
-        files,
-        vec![
-            "blog/0/index.html",
-            "blog/welcome-to-my-blog/index.html",
-            "index.html",
-        ]
-    );
+    let expected_files = vec![
+        "blog/0/index.html",
+        "blog/welcome-to-my-blog/index.html",
+        "index.html",
+    ];
+    assert_eq!(files, expected_files);
 
-    for file in walk(example_project_dir.join("public"), &Some("html")) {
-        let contents = std::fs::read_to_string(&file).unwrap();
+    for file in expected_files {
+        let contents = std::fs::read_to_string(&out_dir.join(file)).unwrap();
         insta::assert_yaml_snapshot!(contents.split('\n').collect::<Vec<&str>>());
     }
 }
