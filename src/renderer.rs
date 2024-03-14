@@ -15,7 +15,6 @@ use crate::{diskio, Config, Markdown};
 
 pub const BLOCK_RULES_TEMPLATE_VAR: &str = "__block_rules";
 pub const STATIC_ASSET_MAP_TEMPLATE_VAR: &str = "__static_asset_map";
-pub const TAILWIND_FILENAME_TEMPLATE_VAR: &str = "__tailwind_filename";
 
 // TODO not sure I necessarily want this specific impl...
 type Partials = EagerCompiler<InMemorySource>;
@@ -28,8 +27,7 @@ pub enum RenderError {
 
 type RenderResult<T> = Result<T, RenderError>;
 
-// TODO this is pretty silly, just want the rel path, don't need a fancy fn for it.
-fn make_partial_key(partial_path: &Utf8Path, current_dir: &Utf8Path) -> String {
+fn normalize_partial_name(partial_path: &Utf8Path, current_dir: &Utf8Path) -> String {
     partial_path
         .strip_prefix(current_dir)
         .unwrap()
@@ -97,8 +95,8 @@ fn get_meta_context(page_data: &PageData) -> liquid::Object {
                 "title": "",
                 "timestamp": "",
                 "entries": entries,
-                "prev_page_link": prev_page_link, // TODO
-                "next_page_link": next_page_link, // TODO
+                "prev_page_link": prev_page_link,
+                "next_page_link": next_page_link,
             })
         }
         _ => liquid::object!({
@@ -142,16 +140,12 @@ pub struct Renderer {
     layouts: HashMap<String, Template>,
     block_content_template: Template,
     static_asset_map: HashMap<String, String>,
-    // TODO nowadays can probably just get this from the static_asset_map.
-    tailwind_filename: String,
 }
 
 impl Renderer {
     pub async fn new(
         config: &Config,
         static_asset_map: HashMap<String, String>,
-        // TODO why was this needed anyway?
-        css_file_name: String,
         partials: Vec<ContentFile>,
     ) -> Self {
         let partials =
@@ -159,7 +153,7 @@ impl Renderer {
                 .into_iter()
                 .fold(Partials::empty(), |mut partials, content_file| {
                     partials.add(
-                        make_partial_key(&content_file.abs_path, &config.project_dir),
+                        normalize_partial_name(&content_file.abs_path, &config.project_dir),
                         content_file.content.unwrap().inner,
                     );
                     partials
@@ -189,7 +183,6 @@ impl Renderer {
             layouts,
             block_content_template,
             static_asset_map,
-            tailwind_filename: css_file_name,
         }
     }
 
@@ -219,7 +212,6 @@ impl Renderer {
                 "content": content,
                 BLOCK_RULES_TEMPLATE_VAR: render_rules.block_rules,
                 STATIC_ASSET_MAP_TEMPLATE_VAR: self.static_asset_map,
-                TAILWIND_FILENAME_TEMPLATE_VAR: self.tailwind_filename,
             });
             // TODO better not to discard the info from here
             content = template.render(&globals)?;

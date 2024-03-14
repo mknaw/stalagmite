@@ -144,7 +144,6 @@ impl Generator {
             .map(|template| template.initialize_file_content());
         join_all(load_content_futures).await;
 
-        let tailwind_alias = assets::TAILWIND_FILENAME.to_string();
         let (asset_map, assets_have_changed) = self.collect_assets(&site_nodes, &templates).await?;
         let force_render = {
             let conn = cache::new_connection().await?;
@@ -152,8 +151,7 @@ impl Generator {
                 || assets_have_changed
                 || check_latest_modified_template(&conn, &templates).await
         };
-        let renderer =
-            Arc::new(Renderer::new(&self.config, asset_map, tailwind_alias, templates).await);
+        let renderer = Arc::new(Renderer::new(&self.config, asset_map, templates).await);
 
         // TODO where will I get these numbers from... what are good numbers?
         let (render_tx, render_rx) = tokio::sync::mpsc::channel::<RenderChannelItem>(10);
