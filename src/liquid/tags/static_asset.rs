@@ -58,7 +58,7 @@ pub fn get_actual_filename(alias: &str, runtime: &dyn Runtime) -> Result<String>
         .get(alias)
         .map_or(alias.to_string(), |v| v.to_kstr().as_str().to_string());
 
-    Ok(format!("static/{}", cache_busted))
+    Ok(format!("/static/{}", cache_busted))
 }
 
 impl Renderable for StaticAsset {

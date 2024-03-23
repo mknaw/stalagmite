@@ -39,7 +39,7 @@ impl Renderable for Tailwind {
     /// Include the tailwind stylesheet.
     fn render_to(&self, writer: &mut dyn Write, runtime: &dyn Runtime) -> Result<()> {
         let tailwind_filename = get_actual_filename("tw.css", runtime)?;
-        let include_tag = format!(r#"<link rel="stylesheet" href="/{}">"#, tailwind_filename);
+        let include_tag = format!(r#"<link rel="stylesheet" href="{}">"#, tailwind_filename);
         // TODO really should convert to a liquid::Error
         writer.write_all(include_tag.as_bytes()).unwrap();
         Ok(())

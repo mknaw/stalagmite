@@ -47,17 +47,21 @@ struct RenderBlock {
     // TODO could allow for an ad-hoc override
 }
 
-fn find_partial_name(block_rules: &dyn ObjectView, kind: &str) -> Result<String> {
-    let partial_name = block_rules
-        .get(kind)
-        .map_or(kind.to_string(), |v| v.to_kstr().as_str().to_string());
+fn find_partial_name(block_rules: Option<&dyn ObjectView>, kind: &str) -> Result<String> {
+    let partial_name = if let Some(block_rules) = block_rules {
+        block_rules
+            .get(kind)
+            .map_or(kind.to_string(), |v| v.to_kstr().as_str().to_string())
+    } else {
+        kind.to_string()
+    };
     Ok(format!("blocks/{}.liquid", partial_name))
 }
 
 fn render_block(
     runtime: &dyn Runtime,
     block: &dyn ObjectView,
-    block_rules: &dyn ObjectView,
+    block_rules: Option<&dyn ObjectView>,
 ) -> Result<String> {
     let value = block
         .get("kind")
@@ -111,11 +115,11 @@ impl Renderable for RenderBlock {
         let rules_path = rules_expr.evaluate(runtime)?;
         // TODO has to be an `as_object`, but we could be more civil with an Err message.
         let block_rules = runtime.get(&rules_path)?;
-        let block_rules = block_rules.as_object().unwrap();
+        let block_rules = block_rules.as_object();
 
         // TODO really should convert to a liquid::Error
         writer
-            .write_all(render_block(runtime, block, &block_rules)?.as_bytes())
+            .write_all(render_block(runtime, block, block_rules)?.as_bytes())
             .unwrap();
         Ok(())
     }

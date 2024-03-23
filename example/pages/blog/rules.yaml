@@ -1,8 +1,6 @@
 layouts:
   - primary
   - blogpost
-blocks:
-  p: fancy-paragraph
 listing:
   layouts:
     - primary

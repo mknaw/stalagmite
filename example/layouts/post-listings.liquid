@@ -1,17 +1,15 @@
-<div>
-    <ul>
-        {% for entry in meta.entries %}
-            <li class="bg-green-500">
-                <a href="{{ entry.link }}">
-                    {{ entry.title }}
-                </a>
-                <div>
-                    {% assign first_p = entry|first_block_of_kind:"p" %}
-                    {% render_block first_p %}
-                </div>
-            </li>
-        {% endfor %}
-    </ul>
+<div class="pt-5">
+    {% for entry in meta.entries %}
+        <div>
+            <a href="{{ entry.link }}" class="text-black no-underline hover:text-amber-800">
+                {{ entry.title }}
+            </a>
+            <div>
+                {% assign first_p = entry|first_block_of_kind:"p" %}
+                {% render_block first_p %}
+            </div>
+        </div>
+    {% endfor %}
 </div>
 {% if meta.prev_page_link %}
     <div>

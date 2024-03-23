@@ -4,26 +4,32 @@
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{{ meta.title|default:"Example Stalagmite Site" }}</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200..800&display=swap" rel="stylesheet">
         {% tailwind %}
+        <link rel="stylesheet" href="{% static_asset "extra-styles.css" %}">
     </head>
-    <body>
-        <main>
-            <nav class="bg-gray-800">
-                <div class="container mx-auto px-6 py-3">
-                    <div class="flex justify-between items-center">
-                        <div class="flex">
-                            <div class="text-white text-lg font-semibold">Stalagmite</div>
-                            <div class="ml-10 space-x-4">
-                                <a href="/" class="text-gray-300 hover:text-white">Home</a>
-                                <a href="/blog/0/" class="text-gray-300 hover:text-white">Blog</a>
-                                <a href="#projects" class="text-gray-300 hover:text-white">Projects</a>
-                            </div>
+    <body class="px-2 sm:py-8 md:py-16 py-8 sm:py-16 md:py-28 bg-stone-100">
+        <main class="flex justify-center">
+            <div class="w-5/6 sm:w-2/3 md:w-1/2">
+                <nav class="container bg-amber-700">
+                    <div class="flex justify-between items-center px-6 py-3">
+                        <div class="text-white text-lg font-semibold">
+                            <a href="/" class="text-amber-100 no-underline hover:text-amber-50">
+                                Stalagmite
+                            </a>
+                        </div>
+                        <div class="space-x-4 text-m">
+                            <a href="/blog/0/" class="text-amber-200 no-underline hover:text-amber-100">Blog</a>
                         </div>
                     </div>
-                </div>
-            </nav>
+                </nav>
 
-            {{ content }}
+                <div class="px-2">
+                    {{ content }}
+                </div>
+            </div>
         </main>
     </body>
 </html>
